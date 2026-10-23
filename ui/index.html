@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trill Stem Separator</title>
+<style>/*STYLE*/</style>
+</head>
+<body>
+<div class="app-bg" aria-hidden="true"><div class="haze"></div><div class="grid"></div></div>
+<div class="aura" id="aura" aria-hidden="true"></div>
+
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 227.91 194.35" aria-hidden="true"><path fill-rule="evenodd" d="M149.9,103.22c1.82,18.59-19.61,22.57-36.350,22.75-17.55.2-26.51-20.03-22.75-36.35,3.760-16.32,25.49-24.24,36.35-22.75,16.6,2.26,21.24,20.9,22.75,36.35ZM150.67,153.97c25.5,17.43,56.03,29.36,71.21,9.24,15.68-20.78-1.71-43.68-23.55-64.45,20.18-24.05,32.11-52.34,13.4-74.11-21.75-25.3-60.42-13.39-91.72,6.600C115.27,6.59,92.75-3.89,69.64,1.29c-13.04,2.93-26.28,10.17-31.68,21.26-5.910,12.13-3.250,27,1.940,41.36C9.9,71.9-6.9,99.76,2.71,129.18c4.8,14.7,13.44,28.26,30.09,32.3,14.61,3.54,30.14-.32,44.13-6,.46,22.53,14.81,37.72,37.72,38.82,23.54,1.13,37.55-16.93,36.02-40.34Z"/></svg>
+      <span class="word">trill</span><span class="sub">stem separator</span>
+    </div>
+    <div class="pill gpu" id="gpu"><i></i><span>Checking GPU</span></div>
+  </header>
+
+  <main class="cols">
+    <section class="card samples arrive">
+      <div class="row head">
+        <span class="eyebrow">Samples</span>
+        <span class="count" id="count"></span>
+        <button class="btn ghost sm" id="clear">Clear</button>
+      </div>
+      <button class="drop" id="drop">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0l-4 4m4-4l4 4M5 15v3a2 2 0 002 2h10a2 2 0 002-2v-3"/></svg>
+        <span>Drop samples or click</span>
+      </button>
+      <div class="row yt">
+        <input id="yt" class="field" placeholder="Paste YouTube link" spellcheck="false" autocomplete="off">
+        <button class="btn tint" id="yt-add"><span class="fill"></span><span class="lbl">Add</span></button>
+        <button class="btn tint" id="yt-dl"><span class="fill"></span><span class="lbl">Download</span></button>
+      </div>
+      <div class="list" id="files"></div>
+    </section>
+
+    <section class="card settings arrive">
+      <label class="eyebrow">Model</label>
+      <div class="select" id="model"><button class="field select-btn"><span></span><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button><div class="menu"></div></div>
+
+      <label class="eyebrow">Quality</label>
+      <div class="seg" id="quality"></div>
+
+      <label class="eyebrow">Format</label>
+      <div class="seg" id="format"></div>
+
+      <button class="switch" id="nodrums" role="switch"><span class="track"><span class="thumb"></span></span><span>No Drums file</span></button>
+
+      <label class="eyebrow">Save to</label>
+      <div class="row out">
+        <div class="field path" id="out" title=""></div>
+        <button class="btn tint" id="out-change">Change</button>
+        <button class="btn tint" id="out-open">Open</button>
+      </div>
+    </section>
+  </main>
+
+  <section class="card stems" id="stems" hidden>
+    <div class="row head">
+      <span class="eyebrow">Stems</span>
+      <div class="select result" id="result"><button class="field select-btn"><span></span><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button><div class="menu"></div></div>
+      <span class="tags" id="result-tags"></span>
+      <button class="play" id="play" disabled><svg class="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg><svg class="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg></button>
+      <input type="range" class="seek" id="seek" min="0" max="1000" value="0" disabled>
+      <span class="time" id="ptime">0:00 / 0:00</span>
+      <button class="chip drag" id="all" title="Drag into FL Studio"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg>All</button>
+    </div>
+    <div class="strips" id="strips"></div>
+  </section>
+
+  <footer class="card card-featured foot arrive">
+    <div class="row">
+      <span class="status" id="status">Ready</span>
+      <span class="time" id="elapsed"></span>
+      <button class="btn ghost sm" id="log-btn">Log</button>
+      <button class="btn stop" id="stop" disabled>Stop</button>
+      <button class="btn cta" id="go">Separate</button>
+    </div>
+    <div class="bar" id="bar"><div class="bar-fill" id="bar-fill"><span class="sheen"></span></div></div>
+    <div class="log" id="log"><pre id="log-text"></pre></div>
+  </footer>
+</div>
+
+<div class="dropping" id="dropping"><div>Drop to add</div></div>
+<script>/*SCRIPT*/</script>
+</body>
+</html>

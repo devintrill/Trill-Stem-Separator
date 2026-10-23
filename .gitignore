@@ -1,0 +1,5 @@
+Stems/
+__pycache__/
+*.log
+settings.json
+stem_splitter_tk_backup.py
