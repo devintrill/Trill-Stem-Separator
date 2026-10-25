@@ -178,6 +178,97 @@ for i, job in enumerate(json.load(open(sys.argv[1], encoding="utf-8"))):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 """
+# Kept running by Warm: torch, CUDA and the models stay loaded between splits, which saves ~25s each time
+# (Python + torch start, model load, cuDNN warm-up). Reads one JSON command per line on stdin.
+SERVER = """import gc, json, os, sys, time, traceback
+sys.path.insert(0, os.getcwd())  # the MSST folder
+import numpy as np
+import torch
+import inference
+from utils.settings import get_model_from_config, load_config, parse_args_inference
+from utils.model_utils import demix, load_start_checkpoint
+
+torch.backends.cudnn.benchmark = True
+cuda = torch.cuda.is_available()
+device = "cuda:0" if cuda else "cpu"
+print("@@gpu " + (torch.cuda.get_device_name(0) if cuda else "CPU"), flush=True)
+print("Using device: ", device, flush=True)
+models = {}  # (model_type, checkpoint) -> model on the GPU, least recently used first
+
+
+def free(keep=()):
+    for k in [k for k in models if k not in keep]:
+        if not cuda or torch.cuda.memory_allocated() < 0.35 * torch.cuda.get_device_properties(0).total_memory:
+            break
+        del models[k]
+    gc.collect()
+    if cuda:
+        torch.cuda.empty_cache()
+
+
+def get(args, keep):
+    key = (args.model_type, args.start_check_point)
+    if key in models:
+        models[key] = models.pop(key)  # most recently used
+        return models[key], False
+    free(keep)
+    t = time.time()
+    model, _ = get_model_from_config(args.model_type, args.config_path)
+    checkpoint = torch.load(args.start_check_point, weights_only=False, map_location="cpu")
+    load_start_checkpoint(args, model, checkpoint, type_="inference")
+    del checkpoint
+    models[key] = model.to(device).eval()
+    print(f"Model load time: {time.time() - t:.2f} sec", flush=True)
+    return models[key], True
+
+
+def prepare(job, keep):
+    args = parse_args_inference(job)
+    config = load_config(args.model_type, args.config_path)
+    if "model_type" in config.training:
+        args.model_type = config.training.model_type
+    model, new = get(args, keep)
+    return args, config, model, new
+
+
+def warm(model, args, config):
+    # silence through a full batch so cuDNN picks its kernels now instead of on the first real split
+    if "chunk_size" in config.inference:
+        chunk = config.inference.chunk_size
+    elif args.model_type == "htdemucs":
+        chunk = int(config.training.samplerate * config.training.segment)
+    else:
+        chunk = config.audio.chunk_size
+    n = int(chunk // max(1, config.inference.num_overlap) * config.inference.batch_size + chunk)
+    demix(config, model, np.zeros((2, n), dtype=np.float32), device, model_type=args.model_type)
+
+
+for line in sys.stdin:
+    try:
+        cmd = json.loads(line)
+        jobs = cmd["jobs"]
+        keep = {(j["model_type"], j["start_check_point"]) for j in jobs}
+        if cmd["cmd"] == "warm":
+            for job in jobs:
+                args, config, model, new = prepare(job, keep)
+                if new:
+                    warm(model, args, config)
+            print("@@warmed", flush=True)
+            continue
+        for i, job in enumerate(jobs):
+            print(f"@@part {i}", flush=True)
+            args, config, model, _ = prepare(job, keep)
+            inference.run_folder(model, args, config, device, verbose=True)
+        print(f"@@done {cmd['id']}", flush=True)
+    except Exception as e:
+        traceback.print_exc()
+        sys.stdout.flush()
+        models.clear()
+        gc.collect()
+        if cuda:
+            torch.cuda.empty_cache()
+        print(f"@@fail {cmd.get('id', '') if isinstance(cmd, dict) else ''} {e}".replace(chr(10), " "), flush=True)
+"""
 FORMATS = {
     "WAV": "32-bit float WAV. Lossless and can't clip.",
     "FLAC": "24-bit FLAC. Lossless and about half the size of WAV.",
@@ -899,9 +990,145 @@ class StopRequested(Exception):
 
 
 # ---------- app logic (no UI: everything the window shows arrives through emit()) ----------
+class Warm:
+    """Keeps one MSST process (SERVER) running so a split starts in about a second. If it can't run,
+    usable() is False and the Engine falls back to a fresh process per split, as before."""
+
+    def __init__(self):
+        self.proc = None
+        self.lock = threading.Lock()
+        self.sink = None  # queue the current split reads output from; None while idle
+        self.gpu = None
+        self.gpu_seen = threading.Event()
+        self.next_id = 0
+        self.warming = []  # (sent at, callback) per preload, answered in order by '@@warmed'
+
+    def start(self):
+        with self.lock:
+            if self.proc and self.proc.poll() is None:
+                return
+            if not (MSST_DIR / "inference.py").exists():
+                self.gpu_seen.set()
+                return
+            self.warming = []
+            try:
+                script = CACHE_DIR / "msst_server.py"
+                script.parent.mkdir(parents=True, exist_ok=True)
+                script.write_text(SERVER, encoding="utf-8")
+                env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+                self.proc = subprocess.Popen([console_python(), "-u", str(script)], cwd=MSST_DIR,
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, env=env, creationflags=no_window())
+            except OSError as e:
+                file_log(f"Warm engine couldn't start: {e}")
+                self.proc = None
+                self.gpu_seen.set()
+                return
+            threading.Thread(target=self.read, args=(self.proc,), daemon=True).start()
+
+    def read(self, proc):
+        buf = ""
+        while True:
+            chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
+            if not chunk:
+                break
+            buf += chunk.decode("utf-8", errors="replace")
+            lines = re.split(r"[\r\n]", buf)
+            buf = lines.pop()
+            for line in lines:
+                line = line.strip()
+                if line.startswith("@@gpu "):
+                    self.gpu = line[6:]
+                    self.gpu_seen.set()
+                    continue
+                if line == "@@warmed" and self.warming:
+                    sent, done = self.warming.pop(0)
+                    if done:
+                        done(time.time() - sent)
+                elif self.sink is not None:
+                    self.sink.put(line)
+                elif line and "%|" not in line and "chunks:" not in line:
+                    file_log("engine: " + line)
+        code = proc.wait()
+        file_log(f"Warm engine stopped (exit code {code}).")
+        self.gpu_seen.set()
+        sink = self.sink
+        if sink is not None:
+            sink.put(None)
+
+    def usable(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def send(self, cmd):
+        try:
+            self.proc.stdin.write((json.dumps(cmd) + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
+            return True
+        except (OSError, AttributeError, ValueError):
+            return False
+
+    def preload(self, jobs, done=None):
+        """Load (and warm up) a model's parts in the background, e.g. right after launch."""
+        if jobs and self.usable():
+            self.warming.append((time.time(), done))
+            self.send({"cmd": "warm", "jobs": jobs})
+
+    def run(self, jobs):
+        """Yields the split's output lines; the last one is '@@done' or '@@fail ...'."""
+        self.next_id += 1
+        rid, q = self.next_id, queue.Queue()
+        self.sink = q
+        try:
+            if not self.send({"cmd": "run", "id": rid, "jobs": jobs}):
+                yield "@@fail the engine stopped"
+                return
+            while True:
+                line = q.get()
+                if line is None:
+                    yield "@@fail the engine stopped"
+                    return
+                if line == f"@@done {rid}":
+                    yield "@@done"
+                    return
+                if line.startswith(f"@@fail {rid} "):
+                    yield "@@fail " + line[len(f"@@fail {rid} "):]
+                    return
+                yield line
+        finally:
+            self.sink = None
+
+    def kill(self):
+        with self.lock:
+            if self.proc and self.proc.poll() is None:
+                self.proc.kill()
+
+
+def proc_lines(proc):
+    """A one-off process's output as lines (tqdm redraws with \\r, so split on that too)."""
+    buf = ""
+    while True:
+        chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
+        if not chunk:
+            break
+        buf += chunk.decode("utf-8", errors="replace")
+        lines = re.split(r"[\r\n]", buf)
+        buf = lines.pop()
+        yield from lines
+    if buf.strip():
+        yield buf
+
+
+def part_files(p):
+    """Where a model part's config and weights live once downloaded."""
+    folder = MODELS_DIR / p["folder"]
+    return folder / "config.yaml", folder / ("model" + Path(p["weights"]).suffix)
+
+
 class Engine:
     def __init__(self, emit):
         self.emit = emit
+        self.warm = Warm()
+        self.timing = {}  # step -> seconds for the current split, logged as one line at the end
         self.lock = threading.RLock()
         self.files = []
         self.q = queue.Queue()
@@ -1009,6 +1236,8 @@ class Engine:
             self.settings[key] = bool(value) if key == "nodrums" else value
             self.save_settings()
             self.emit("settings", dict(self.settings))
+            if key == "model":
+                self.preload()
 
     def save_settings(self):
         try:
@@ -1046,8 +1275,8 @@ class Engine:
                         bpm, key = detect_file(path)
                     self.detected[path] = (bpm, key)
                     self.q.put(("info", (path, bpm, key)))
-                    self.q.put(("log", f"{Path(path).name}: {tag_text(bpm, key) or 'no BPM/key found'} "
-                                       f"({time.monotonic() - started:.0f}s)"))
+                    self.q.put(("log", f"Step: BPM/key for {Path(path).name} - {time.monotonic() - started:.1f}s "
+                                       f"({tag_text(bpm, key) or 'no BPM/key found'})"))
             except Exception as e:
                 self.failed.add(path)
                 file_log(traceback.format_exc())
@@ -1061,12 +1290,24 @@ class Engine:
         """The background detector's result for a sample, waiting if it's still working on it."""
         if path in self.pending:
             self.q.put(("status", "Detecting BPM and key..."))
+        t = time.time()
         deadline = time.monotonic() + 60  # never let a slow or stuck detection hold up the stems
         while path in self.pending and time.monotonic() < deadline:
             if self.stop_flag:
                 raise StopRequested()
             time.sleep(0.1)
+        if time.time() - t >= 0.05:
+            self.mark("waiting for BPM/key", time.time() - t)
         return self.detected.get(path)
+
+    def mark(self, step, seconds):
+        """Log a finished step right away, and keep it for the summary line at the end."""
+        self.timing[step] = self.timing.get(step, 0) + seconds
+        self.q.put(("log", f"Step: {step} - {seconds:.1f}s"))
+
+    def log_timing(self, total):
+        parts = ", ".join(f"{k} {v:.1f}s" for k, v in self.timing.items() if v >= 0.05)
+        self.q.put(("log", f"Timing: total {total:.1f}s ({parts})"))
 
     def remove_file(self, f):
         with self.lock:
@@ -1143,6 +1384,16 @@ class Engine:
                 self.update_player()
 
     def check_gpu(self):
+        # The warm engine reports the GPU as soon as torch is up, then preloads the selected model.
+        t = time.time()
+        self.warm.start()
+        if self.warm.gpu_seen.wait(300) and self.warm.gpu:
+            name = self.warm.gpu
+            self.q.put(("log", f"Step: start engine ({name}) - {time.time() - t:.1f}s"))
+            self.gpu = ("No GPU - will be slow", "warn") if name == "CPU" else (name.replace("NVIDIA GeForce ", ""), "good")
+            self.emit("gpu", self.gpu)
+            self.preload()
+            return
         py = console_python()
         try:
             out = subprocess.run(
@@ -1157,6 +1408,17 @@ class Engine:
         else:
             self.gpu = (name.replace("NVIDIA GeForce ", ""), "good")
         self.emit("gpu", self.gpu)
+
+    def preload(self):
+        """Have the warm engine load the selected model now, if it's downloaded, so Separate starts right away."""
+        jobs = []
+        for p in MODELS[self.settings["model"]]["parts"]:
+            cfg, weights = part_files(p)
+            if not (cfg.exists() and weights.exists()):
+                return
+            jobs.append({"model_type": p["type"], "config_path": str(cfg), "start_check_point": str(weights)})
+        self.warm.preload(jobs, lambda secs, name=self.settings["model"]: self.q.put(
+            ("log", f"Step: preload {name} - {secs:.1f}s")))
 
     # ---------- processing ----------
     def start(self):
@@ -1201,11 +1463,15 @@ class Engine:
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
         if self.running:
+            self.warm.kill()  # restarted (and warmed up again) after the split ends
+        if self.running:
             self.set_status("Stopping...", "warn")
 
     def finish(self, result):
         self.running = False
         self.proc = None
+        if not self.warm.usable():  # stopped mid-split or crashed: bring it back for the next one
+            threading.Thread(target=lambda: (self.warm.start(), self.preload()), daemon=True).start()
         self.emit("run", self.run_state())
         if result == "ok":
             self.emit("progress", 1)
@@ -1216,6 +1482,7 @@ class Engine:
 
     def shutdown(self):
         self.stop()
+        self.warm.kill()
         self.player.close()
 
     # ---------- stems / preview ----------
@@ -1414,12 +1681,12 @@ class Engine:
         result = "error"
         results = []
         work = Path(tempfile.mkdtemp(prefix="trill_"))
+        self.timing = {}
+        t_start = time.time()
         try:
             parts = s["model"]["parts"]
             for p in parts:
-                p["_dir"] = MODELS_DIR / p["folder"]
-                p["_config"] = p["_dir"] / "config.yaml"
-                p["_weights"] = p["_dir"] / ("model" + Path(p["weights"]).suffix)
+                p["_config"], p["_weights"] = part_files(p)
                 self.download(p["config"], p["_config"])
                 self.download(p["weights"], p["_weights"])
 
@@ -1438,11 +1705,15 @@ class Engine:
 
             if self.stop_flag:
                 raise StopRequested()
+            self.mark("prepare files", time.time() - t_start)
             self.run_parts(parts, tmp_in, work, s, len(s["files"]) * (3 if s["tta"] else 1) * s["shifts"])
 
             self.q.put(("status", "Saving stems..."))
+            t = time.time()
             self.save_outputs(s, parts, work, names, results)
+            self.mark("save stems", time.time() - t - self.timing.get("waiting for BPM/key", 0))
             result = "ok"
+            self.log_timing(time.time() - t_start)
         except StopRequested:
             result = "stopped"
             self.q.put(("log", "Stopped."))
@@ -1467,6 +1738,17 @@ class Engine:
                          "input_folder": str(tmp_in), "store_dir": str(work / f"part{i}"),
                          "pcm_type": "FLOAT",  # 32-bit float WAV: lossless, no clipping before we export
                          "bigshifts": s["shifts"], "use_tta": s["tta"]})
+        if self.warm.usable():
+            tail, end = self.read_output(self.warm.run(jobs), parts, bars)
+            if self.stop_flag:
+                raise StopRequested()
+            if end == "@@done":
+                return
+            if end != "@@fail the engine stopped":
+                self.raise_failure(tail, end)
+            self.q.put(("log", "The warm engine stopped; running this split on its own."))
+        threading.Thread(target=self.warm.start, daemon=True).start()  # ready again for the next split
+
         (work / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
         (work / "run_parts.py").write_text(RUNNER, encoding="utf-8")
         cmd = [console_python(), "-u", str(work / "run_parts.py"), str(work / "jobs.json")]
@@ -1474,58 +1756,73 @@ class Engine:
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         self.proc = subprocess.Popen(cmd, cwd=MSST_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      env=env, creationflags=no_window())
-        tail = self.read_output(self.proc, parts, bars)
+        tail, _ = self.read_output(proc_lines(self.proc), parts, bars)
         code = self.proc.wait()
         if self.stop_flag:
             raise StopRequested()
         if code != 0:
-            text = "\n".join(tail)
-            if "out of memory" in text.lower():
-                raise RuntimeError("The GPU ran out of memory. Close UVR, FL Studio's GPU plugins or games, "
-                                   "then try again (or use Fast quality).")
-            raise RuntimeError(f"Separation failed (exit code {code}). Open the log for details.")
+            self.raise_failure(tail, f"exit code {code}")
 
-    def read_output(self, proc, parts, bars):
-        """Stream MSST's output into the log and turn its progress bars into one overall bar."""
-        buf = ""
+    def raise_failure(self, tail, why):
+        if "out of memory" in ("\n".join(tail) + str(why)).lower():
+            raise RuntimeError("The GPU ran out of memory. Close UVR, FL Studio's GPU plugins or games, "
+                               "then try again (or use Fast quality).")
+        raise RuntimeError(f"Separation failed ({why}). Open the log for details.")
+
+    def read_output(self, lines, parts, bars):
+        """Stream MSST's output into the log and turn its progress bars into one overall bar.
+        Returns the last lines (for error messages) and the '@@done'/'@@fail' line from the warm engine."""
         pct_re = re.compile(r"Processing audio chunks:\s*(\d{1,3})%")
         index, total_parts = 0, len(parts)
         done_bars, last_pct = 0, 0
         tail = []
-        while True:
-            chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
-            if not chunk:
-                break
-            buf += chunk.decode("utf-8", errors="replace")
-            lines = re.split(r"[\r\n]", buf)
-            buf = lines.pop()
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("@@part "):  # the runner moved on to the next part
-                    index, done_bars, last_pct = int(line.split()[1]), 0, 0
-                    label = parts[index].get("label", parts[index]["folder"])
-                    self.q.put(("status", f"Loading {label} ({index + 1}/{total_parts})..."))
-                    continue
-                if line.startswith("Using device") and "cuda" not in line:
-                    self.q.put(("log", "WARNING: MSST isn't using the GPU, so this will be slow."))
-                match = pct_re.search(line)
-                if match:
-                    pct = int(match.group(1))
-                    if pct < last_pct:
-                        done_bars += 1
-                    last_pct = pct
-                    part_done = min(1.0, (done_bars + pct / 100) / max(1, bars))
-                    self.q.put(("progress", (index + part_done) / total_parts))
-                    self.q.put(("status", f"Separating... {((index + part_done) / total_parts) * 100:.0f}%"))
-                elif "BigShifts" not in line and "%|" not in line:
-                    self.q.put(("log", line))
-                    tail = (tail + [line])[-40:]
-        if buf.strip():
-            self.q.put(("log", buf.strip()))
-            tail.append(buf.strip())
-        return tail
+        t0 = t_part = time.time()
+        label = None
+
+        def finish_part():
+            nonlocal label
+            if label is not None:
+                self.mark(f"split {label}", time.time() - t_part)
+                label = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("Model load time:"):
+                self.timing["model load"] = self.timing.get("model load", 0) + float(re.findall(r"[\d.]+", line)[0])
+                self.q.put(("log", "Step: load model - " + line.split(":", 1)[1].strip()))
+                continue
+            if line.startswith(("@@done", "@@fail")):
+                finish_part()
+                if line.startswith("@@fail"):
+                    self.q.put(("log", "Engine: " + line[7:]))
+                return tail, line
+            if line.startswith("@@part "):  # the runner moved on to the next part
+                if index == 0 and label is None and "waiting for engine" not in self.timing:
+                    self.mark("waiting for engine", time.time() - t0)
+                finish_part()
+                t_part = time.time()
+                index, done_bars, last_pct = int(line.split()[1]), 0, 0
+                label = parts[index].get("label", parts[index]["folder"])
+                self.q.put(("status", f"Loading {label} ({index + 1}/{total_parts})..."))
+                continue
+            if line.startswith("Using device") and "cuda" not in line:
+                self.q.put(("log", "WARNING: MSST isn't using the GPU, so this will be slow."))
+            match = pct_re.search(line)
+            if match:
+                pct = int(match.group(1))
+                if pct < last_pct:
+                    done_bars += 1
+                last_pct = pct
+                part_done = min(1.0, (done_bars + pct / 100) / max(1, bars))
+                self.q.put(("progress", (index + part_done) / total_parts))
+                self.q.put(("status", f"Separating... {((index + part_done) / total_parts) * 100:.0f}%"))
+            elif "BigShifts" not in line and "%|" not in line:
+                self.q.put(("log", line))
+                tail = (tail + [line])[-40:]
+        finish_part()
+        return tail, None
 
     def analyze(self, src, final, sr, want_key):
         """BPM and key of the original sample (falls back to the summed stems if it can't be read)."""
