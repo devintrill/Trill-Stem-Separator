@@ -105,6 +105,9 @@ HTDEMUCS_FT = [
     for stem, weights in (("drums", "f7e0c4bc-ba3fe64a.th"), ("bass", "d12395a8-e57c48e6.th"),
                           ("other", "92cfc3b6-ef3bcb9c.th"), ("vocals", "04573f0d-f3cf25b2.th"))
 ]
+# The base htdemucs model gives all 4 stems in one pass (FT runs 4 models), so Fast uses it.
+HTDEMUCS = {"folder": "htdemucs", "type": "htdemucs", "label": "htdemucs",
+            "config": f"{RAW}/config_musdb18_htdemucs.yaml", "weights": f"{DEMUCS}/955717e8-8726e21a.th"}
 
 MODELS = {
     "BS-RoFormer SW": {
@@ -121,6 +124,7 @@ MODELS = {
         "desc": "Vocals, drums, bass, other. Same as UVR's htdemucs_ft.",
         "has_drums": True,
         "parts": HTDEMUCS_FT,
+        "fast_parts": [HTDEMUCS],
     },
     "Ensemble: BS-RoFormer SW + SCNet XL IHF + HTDemucs FT": {
         "desc": "Averages all three on vocals, drums, bass, other (SW counts double). "
@@ -1121,6 +1125,11 @@ def proc_lines(proc):
         yield buf
 
 
+def model_parts(model, quality):
+    m = MODELS[model]
+    return m.get("fast_parts", m["parts"]) if quality == "Fast" else m["parts"]
+
+
 def part_files(p):
     """Where a model part's config and weights live once downloaded."""
     folder = MODELS_DIR / p["folder"]
@@ -1239,7 +1248,7 @@ class Engine:
             self.settings[key] = bool(value) if key == "nodrums" else value
             self.save_settings()
             self.emit("settings", dict(self.settings))
-            if key == "model":
+            if key in ("model", "quality"):
                 self.preload()
 
     def save_settings(self):
@@ -1415,7 +1424,7 @@ class Engine:
     def preload(self):
         """Have the warm engine load the selected model now, if it's downloaded, so Separate starts right away."""
         jobs = []
-        for p in MODELS[self.settings["model"]]["parts"]:
+        for p in model_parts(self.settings["model"], self.settings["quality"]):
             cfg, weights = part_files(p)
             if not (cfg.exists() and weights.exists()):
                 return
@@ -1440,7 +1449,7 @@ class Engine:
             q = QUALITY[st["quality"]]
             settings = {
                 "model_name": model_name,
-                "model": MODELS[model_name],
+                "model": dict(MODELS[model_name], parts=model_parts(model_name, st["quality"])),
                 "files": list(self.files),
                 "out": Path(st["out"]),
                 "overlap": q["overlap"],
