@@ -1000,3 +1000,6 @@ body { font-feature-settings: 'cv11', 'ss01'; letter-spacing: -0.006em; }
 .strip.drag:active { cursor: grabbing; }
 /* busy button: progress fill glides instead of stepping */
 .btn.tint .fill { transition: width 420ms var(--out); }
+
+/* keep the GPU free for splitting: no blurred glow repainting every frame while it works */
+.foot::before { display: none; }

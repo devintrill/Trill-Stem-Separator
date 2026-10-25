@@ -197,9 +197,8 @@ models = {}  # (model_type, checkpoint) -> model on the GPU, least recently used
 
 
 def free(keep=()):
+    # only the model in use stays on the GPU: on 8 GB cards anything more pushes Windows into slow shared memory
     for k in [k for k in models if k not in keep]:
-        if not cuda or torch.cuda.memory_allocated() < 0.35 * torch.cuda.get_device_properties(0).total_memory:
-            break
         del models[k]
     gc.collect()
     if cuda:
@@ -259,6 +258,8 @@ for line in sys.stdin:
             print(f"@@part {i}", flush=True)
             args, config, model, _ = prepare(job, keep)
             inference.run_folder(model, args, config, device, verbose=True)
+        if cuda:
+            torch.cuda.empty_cache()  # give back the working memory so other apps don't spill while idle
         print(f"@@done {cmd['id']}", flush=True)
     except Exception as e:
         traceback.print_exc()
@@ -444,7 +445,9 @@ def neural_models():
         _neural["ok"] = True
         try:
             import torch
-            _neural["device"] = dev = "cuda" if torch.cuda.is_available() else "cpu"
+            # CPU on purpose: these models are small, and keeping them off the GPU leaves its memory
+            # and time to the separation engine (sharing it made splits several times slower).
+            _neural["device"] = dev = "cpu"
         except Exception:
             file_log("torch unavailable, using librosa for BPM/key:\n" + traceback.format_exc())
             return _neural
