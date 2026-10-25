@@ -753,7 +753,70 @@ def load_stems(paths):
     return data, sr
 
 
+def stem_peaks(data, bars=96):
+    """Loudness outline of each stem for the waveforms, scaled together so quiet stems look quiet."""
+    frames = data.shape[1]
+    if frames < bars:
+        return [[0.0] * bars for _ in range(data.shape[0])]
+    mono = np.abs(data).max(axis=2)[:, :frames - frames % bars]
+    peaks = mono.reshape(data.shape[0], bars, -1).max(axis=2)
+    peaks = np.sqrt(peaks / max(float(peaks.max()), 1e-6))  # sqrt so quieter detail still shows
+    return [[round(float(v), 3) for v in row] for row in peaks]
+
+
 # ---------- YouTube ----------
+def find_deno():
+    """deno.exe on PATH or where winget puts it (winget doesn't refresh PATH for apps already running)."""
+    exe = shutil.which("deno")
+    if exe:
+        return exe
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    for p in (local / "Microsoft" / "WinGet" / "Links" / "deno.exe", Path.home() / ".deno" / "bin" / "deno.exe"):
+        if p.exists():
+            return str(p)
+    return next((str(p) for p in (local / "Microsoft" / "WinGet" / "Packages").glob("DenoLand.Deno*/deno.exe")), None)
+
+
+def find_node():
+    """node.exe (installed by the launcher for key detection); yt-dlp can use it instead of Deno."""
+    exe = shutil.which("node")
+    if exe:
+        return exe
+    p = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / "node.exe"
+    return str(p) if p.exists() else None
+
+
+def js_runtimes():
+    found = {}
+    if find_deno():
+        found["deno"] = {"path": find_deno()}
+    if find_node():
+        found["node"] = {"path": find_node()}
+    return found
+
+
+def ensure_youtube_support():
+    """YouTube now needs a JavaScript runtime (Node or Deno) and yt-dlp's solver scripts. Installs whatever is
+    missing, once, quietly in the background; downloads keep working meanwhile, just with fewer formats."""
+    if os.name != "nt":
+        return
+    try:
+        if not js_runtimes():
+            subprocess.run(["winget", "install", "-e", "--id", "DenoLand.Deno", "--silent",
+                            "--accept-package-agreements", "--accept-source-agreements"],
+                           capture_output=True, timeout=900, creationflags=no_window())
+            file_log("Deno for YouTube: " + ("installed" if find_deno() else "install failed"))
+        import importlib.util
+        if importlib.util.find_spec("yt_dlp_ejs") is None:
+            py = Path(sys.executable).with_name("python.exe")
+            r = subprocess.run([str(py if py.exists() else sys.executable), "-m", "pip", "install", "-q",
+                                "--disable-pip-version-check", "-U", "yt-dlp[default]"],
+                               capture_output=True, text=True, timeout=900, creationflags=no_window())
+            file_log("yt-dlp update for YouTube: " + ("done" if r.returncode == 0 else r.stderr.strip()[-300:]))
+    except Exception as e:  # never in the way of the app
+        file_log(f"YouTube support setup skipped: {e}")
+
+
 def youtube_download(url, dest_dir, progress, log, fmt="WAV"):
     """Download a video's audio as WAV/FLAC/MP3 named after its title. Returns the file path."""
     import imageio_ffmpeg
@@ -801,6 +864,9 @@ def youtube_download(url, dest_dir, progress, log, fmt="WAV"):
         "logger": Logger(),
         "progress_hooks": [hook],
     }
+    runtimes = js_runtimes()
+    if runtimes:
+        opts["js_runtimes"] = runtimes
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if info and info.get("entries"):
@@ -865,6 +931,7 @@ class Engine:
 
         threading.Thread(target=self.pump, daemon=True).start()
         threading.Thread(target=self.check_gpu, daemon=True).start()
+        threading.Thread(target=ensure_youtube_support, daemon=True).start()
         threading.Thread(target=self.detect_loop, daemon=True).start()
 
     # ---------- state sent to the window ----------
@@ -1172,13 +1239,20 @@ class Engine:
         except Exception as e:
             self.q.put(("log", f"Couldn't load stems for preview ({e})."))
             return
-        self.q.put(("mixer_ready", (token, names, data, sr)))
+        try:
+            peaks = stem_peaks(data)
+        except Exception as e:  # waveforms are a nicety; preview still works without them
+            file_log(f"Waveforms failed: {e}")
+            peaks = []
+        self.q.put(("mixer_ready", (token, names, data, sr, peaks)))
 
-    def on_mixer_ready(self, token, names, data, sr):
+    def on_mixer_ready(self, token, names, data, sr, peaks):
         if token != self.load_token:  # another sample was picked meanwhile
             return
         self.mixer.load(names, data, sr)
         self.update_player(force=True)
+        if peaks:
+            self.emit("peaks", {"names": names, "peaks": peaks})
 
     def toggle_strip(self, which, name):
         with self.lock:
@@ -1547,19 +1621,21 @@ class Engine:
 # ---------- window ----------
 UI_DIR = APP_DIR / "ui"
 FONT_DIR = APP_DIR / "fonts"
-FONT_FILES = (("Aeonik-Light.ttf", 300), ("Aeonik-Regular.ttf", 400), ("Aeonik-Medium.ttf", 500))
+FONT_FAMILY = "Inter"
+FONT_FILES = (("Inter-300.woff2", 300), ("Inter-400.woff2", 400), ("Inter-500.woff2", 500))
 
 
 def build_page():
-    """One self-contained page: the ui/ files inlined, Aeonik embedded, so nothing loads from disk later."""
+    """One self-contained page: the ui/ files inlined, the font embedded, so nothing loads from disk later."""
     html = (UI_DIR / "index.html").read_text(encoding="utf-8")
     faces = []
     for name, weight in FONT_FILES:
         f = FONT_DIR / name
         if f.exists():
             data = base64.b64encode(f.read_bytes()).decode("ascii")
-            faces.append(f"@font-face{{font-family:'Aeonik';font-weight:{weight};font-style:normal;"
-                         f"src:url(data:font/ttf;base64,{data}) format('truetype');}}")
+            kind = "woff2" if f.suffix == ".woff2" else "truetype"
+            faces.append(f"@font-face{{font-family:'{FONT_FAMILY}';font-weight:{weight};font-style:normal;"
+                         f"src:url(data:font/{f.suffix[1:]};base64,{data}) format('{kind}');}}")
     css = "\n".join(faces) + "\n" + (UI_DIR / "app.css").read_text(encoding="utf-8")
     js = (UI_DIR / "app.js").read_text(encoding="utf-8")
     return html.replace("/*STYLE*/", css).replace("/*SCRIPT*/", js)
@@ -1689,6 +1765,26 @@ class Api:
             return False
 
 
+def set_icon(window):
+    """Give the window and its taskbar button the app icon (icon.ico next to this file)."""
+    ico = APP_DIR / "icon.ico"
+    if os.name != "nt" or not ico.exists():
+        return
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        u.LoadImageW.restype = ctypes.c_void_p
+        u.SendMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
+        hwnd = ctypes.c_void_p(window.native.Handle.ToInt64())
+        for which, metric in ((0, 49), (1, 11)):         # ICON_SMALL / SM_CXSMICON, ICON_BIG / SM_CXICON
+            size = u.GetSystemMetrics(metric)
+            h = u.LoadImageW(None, str(ico), 1, size, size, 0x10)  # IMAGE_ICON, LR_LOADFROMFILE
+            if h:
+                u.SendMessageW(hwnd, 0x80, ctypes.c_void_p(which), ctypes.c_void_p(h))  # WM_SETICON
+    except Exception:
+        pass
+
+
 def dark_title_bar(window):
     """Paint the Windows title bar the page's navy instead of the accent colour (Windows 11; dark on 10)."""
     if os.name != "nt":
@@ -1710,6 +1806,12 @@ def dark_title_bar(window):
 def main():
     if not (UI_DIR / "index.html").exists():
         fatal(f"The ui folder is missing. It must sit next to {Path(__file__).name}.")
+    if os.name == "nt":
+        try:  # own taskbar identity, so Windows shows our icon instead of Python's
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SampleMachine.App")
+        except Exception:
+            pass
     bridge = Bridge()
     engine = Engine(bridge.emit)
     api = Api(engine, bridge)
@@ -1739,7 +1841,7 @@ def main():
         engine.shutdown()
 
     window.events.loaded += on_loaded
-    window.events.shown += lambda *_: dark_title_bar(window)
+    window.events.shown += lambda *_: (set_icon(window), dark_title_bar(window))
     window.events.closing += on_closing
     webview.start(gui="edgechromium" if os.name == "nt" else None, debug=False)
 

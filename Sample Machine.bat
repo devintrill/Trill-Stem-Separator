@@ -10,7 +10,7 @@ if not exist "%PY%" (
   exit /b
 )
 
-"%PY%" -c "import webview, clr, sounddevice, soundfile, yt_dlp, imageio_ffmpeg, librosa" >nul 2>&1
+"%PY%" -c "import sys, importlib.util as u; sys.exit(any(u.find_spec(m) is None for m in 'webview clr sounddevice soundfile yt_dlp imageio_ffmpeg librosa'.split()))" >nul 2>&1
 if errorlevel 1 (
   echo First run: installing the app's packages. This only happens once...
   "%PY%" -m pip install --disable-pip-version-check -q pywebview pythonnet sounddevice soundfile yt-dlp imageio-ffmpeg librosa
@@ -21,13 +21,13 @@ if errorlevel 1 (
   )
 )
 
-"%PY%" -c "import deeprhythm, skey, nnAudio, einops" >nul 2>&1
+"%PY%" -c "import sys, importlib.util as u; sys.exit(any(u.find_spec(m) is None for m in 'deeprhythm skey nnAudio einops'.split()))" >nul 2>&1
 if errorlevel 1 (
   echo Installing the BPM/key models. This only happens once...
   "%PY%" -m pip install --disable-pip-version-check -q --no-deps deeprhythm==0.0.13 nnAudio==0.3.3 einops "git+https://github.com/deezer/skey@918b83d"
 )
 
-"%PY%" -c "import madmom" >nul 2>&1
+"%PY%" -c "import sys, importlib.util as u; sys.exit(any(u.find_spec(m) is None for m in 'madmom'.split()))" >nul 2>&1
 if errorlevel 1 (
   echo Installing the key model. This only happens once...
   "%PY%" -m pip install --disable-pip-version-check -q cython mido
