@@ -9,7 +9,7 @@ A dark-mode Windows desktop app for splitting songs and samples into stems (voca
 SampleSmith is a front end for [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (MSST) by ZFTurbo. MSST does the heavy lifting on your GPU; this app gives it a simple window: drop files in, pick a model and a quality level, press go.
 
 - The window is HTML/CSS/JS (`ui/`) displayed with **pywebview** using Microsoft Edge **WebView2**.
-- All processing runs in `stem_splitter.py`, using the Python environment that ships with your MSST install.
+- All processing runs in `app/samplesmith.py`, in a private Python 3.11 environment that setup creates in `runtime/`.
 - Separation models are downloaded automatically the first time you use them.
 - Tested on an **NVIDIA RTX 4060 (8 GB)**.
 
@@ -27,91 +27,29 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 - **Output as 32-bit float WAV or 320 kbps MP3**, with clear file names.
 - **Optional "no drums" mix** for models that produce a drum stem.
 - **Live log and progress bar**, plus a log file on disk for troubleshooting.
-- **Self-installing launcher**: missing pieces are installed on first run, and launch is never blocked by an optional component.
+- **One-click setup**: SampleSmith.exe installs everything on first run and repairs anything that goes missing.
 
 ---
 
 ## Requirements
 
-| Item | Notes |
-|---|---|
-| Windows 10 or 11 (64-bit) | Edge WebView2 runtime (preinstalled on current Windows) |
-| NVIDIA GPU with CUDA | 8 GB VRAM recommended; tested on RTX 4060 8 GB |
-| Up-to-date NVIDIA driver | Needed for CUDA builds of PyTorch |
-| Git | To clone MSST |
-| Python 3.10 | Used for the MSST virtual environment |
-| MSST | Must live at `C:\Music-Source-Separation-Training` with a `venv` inside |
-| Node.js LTS | For Essentia key detection; installed automatically via winget if missing |
-| Internet connection | First run only: packages and model downloads |
+- Windows 10 or 11 (64-bit)
+- An NVIDIA graphics card (RTX 20 series or newer, 6 GB+ VRAM recommended) with a current driver
+- About 8 GB of free disk space and an internet connection for setup
 
 ---
 
 ## Installation
 
-### 1. Install Python 3.10 and Git
+1. Download SampleSmith and unzip it anywhere (for example your Desktop or Documents).
+2. Double-click **SampleSmith.exe**. If Windows SmartScreen appears, choose *More info* > *Run anyway*.
+3. The first time, a setup window installs everything SampleSmith needs into the `runtime` folder next to it: Python 3.11, PyTorch with CUDA, the MSST separation engine, Node.js and the detection models. It downloads about 4 GB, then opens the app and adds Desktop and Start menu shortcuts.
 
-Download Python 3.10 from python.org (tick "Add python.exe to PATH" or use the `py` launcher) and Git from git-scm.com.
+After that, SampleSmith.exe opens the app directly. If anything goes missing, it runs setup again to repair it.
 
-### 2. Clone MSST to the expected location
+To uninstall, delete the SampleSmith folder, the shortcuts and `%APPDATA%\SampleSmith`.
 
-The app looks for MSST at exactly `C:\Music-Source-Separation-Training`. Open **Command Prompt** and run:
-
-```bat
-cd /d C:\
-git clone https://github.com/ZFTurbo/Music-Source-Separation-Training.git
-cd Music-Source-Separation-Training
-```
-
-### 3. Create the Python 3.10 virtual environment
-
-```bat
-py -3.10 -m venv venv
-venv\Scripts\activate
-python -m pip install --upgrade pip
-```
-
-The folder must be named `venv` so that `C:\Music-Source-Separation-Training\venv\Scripts\python.exe` exists.
-
-### 4. Install PyTorch with CUDA
-
-Install the CUDA build of PyTorch **before** MSST's other requirements, so a CPU-only build is not pulled in. For example (CUDA 12.1):
-
-```bat
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-Check the current command for your setup on pytorch.org if needed.
-
-### 5. Install MSST's requirements
-
-```bat
-pip install -r requirements.txt
-```
-
-### 6. Verify the GPU is visible
-
-```bat
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-```
-
-This should print `True` followed by your GPU name.
-
-### 7. Put the app anywhere you like
-
-Copy the `TRILL STEM SEPARATOR` folder anywhere, for example to your Desktop. Keep `stem_splitter.py`, the `.bat`, `ui/`, `fonts/` and `essjs/` together.
-
-### 8. First launch
-
-Double-click **`SampleSmith.bat`**. On first run it will:
-
-1. Check that the MSST venv exists (and tell you if it does not).
-2. Install the app's Python packages into the MSST venv: pywebview, pythonnet, sounddevice, soundfile, yt-dlp, imageio-ffmpeg, librosa.
-3. Install the BPM and key detection packages: DeepRhythm, nnAudio, einops and S-KEY.
-4. Install Node.js LTS with winget if Node is not found.
-5. Install essentia.js into `essjs/` with npm.
-6. Start the app.
-
-Steps 3 to 5 are optional extras: if any of them fail, the app still launches and falls back to other detectors. Later launches skip everything that is already installed.
+Separation models download automatically the first time you use each one.
 
 ---
 
@@ -171,9 +109,8 @@ Detection runs on each input file, and the result is shown in the app and can be
 Key detectors are tried in this order:
 
 1. **Essentia KeyExtractor** (`bgate` profile), run through Node.js and essentia.js in `essjs/`.
-2. **madmom** key recognition.
-3. **S-KEY**.
-4. **librosa** chroma analysis.
+2. **S-KEY** by Deezer Research (madmom is used before it if you installed it yourself).
+3. **librosa** chroma analysis.
 
 The key is shown with its relative major or minor, for example `A min / C maj`, so you can match it either way in your project.
 
@@ -190,49 +127,41 @@ The key is shown with its relative major or minor, for example `A min / C maj`, 
 
 ## Troubleshooting
 
-**"Can't find MSST at C:\Music-Source-Separation-Training"**
-MSST is missing or the venv is not named `venv`. Repeat installation steps 2 to 5.
+**Setup stopped with an error**
+Check your internet connection and open SampleSmith.exe again; setup continues where it stopped. The full output is in `%APPDATA%\SampleSmith\install.log`.
 
-**Out of memory / CUDA errors / very slow runs**
-Close **Ultimate Vocal Remover (UVR)** and any other GPU-heavy programs (games, other separators, video editors) to free VRAM. On 8 GB cards, the Ensemble model and Best quality use the most memory and time. Try Fast, or a single model.
-
-**Separation runs on the CPU**
-PyTorch was installed without CUDA. Reinstall it with the CUDA command in step 4 and run the check in step 6.
-
-**Key detection seems less accurate / Node missing**
-If Node.js is not installed, Essentia cannot run and the app falls back to madmom, S-KEY or librosa. Install Node.js LTS manually (`winget install OpenJS.NodeJS.LTS`), then in the app folder run `npm install essentia.js` inside `essjs\`, and restart the app.
-
-**First-run install failed**
-Check your internet connection and run the `.bat` again. Already-installed packages are skipped.
+**Splitting is very slow / "No GPU"**
+SampleSmith needs an NVIDIA graphics card with a current driver. Update the driver from nvidia.com and restart the app.
 
 **The window is blank**
 Install or repair the Microsoft Edge WebView2 Runtime.
 
+**YouTube downloads fail**
+YouTube changes often. SampleSmith updates its downloader once a week in the background; restart the app to pick up the update.
+
 **Logs**
-- The app's live log is available from the log button in the window.
-- Everything is also written to **`trill.log`** next to `stem_splitter.py`. It is kept under about 1 MB; the previous log is moved to `trill.old.log`. Include it when reporting a problem.
+Open the log from the button in the window. Everything is also written to `%APPDATA%\SampleSmith\samplesmith.log`; include it when reporting a problem.
 
 ---
 
 ## Folder layout
 
 ```
-TRILL STEM SEPARATOR\
-  SampleSmith.bat   Launcher: checks and installs dependencies, then starts the app
-  stem_splitter.py           The app: separation, detection, player, window backend
-  settings.json              Your saved choices (created automatically)
-  trill.log                  Log file (created automatically)
-  ui\
-    index.html               Window layout
-    app.css                  Styling
-    app.js                   Window behaviour
-  fonts\                     Bundled fonts for the UI
-  essjs\                     Node.js helper and essentia.js for key detection
-  Stems\                     Default output folder
+SampleSmith\
+  SampleSmith.exe      Starts the app (and runs setup the first time)
+  app\
+    samplesmith.py     The app: separation, detection, player, window backend
+    ui\                Window layout, styling and behaviour
+    fonts\             Inter (SIL Open Font License)
+    essjs\             Node.js helper for Essentia key detection
+  setup\
+    install.ps1        One-click setup
+    requirements.txt   Python packages
+    launcher\          Source of SampleSmith.exe (Go)
+  runtime\             Created by setup: Python, packages, engine, models, Node
 
-C:\Music-Source-Separation-Training\
-  venv\                      Python 3.10 environment used by the app
-  models\                    Downloaded separation model weights
+%APPDATA%\SampleSmith\  settings.json, samplesmith.log, install.log
+Music\SampleSmith\      Default Stems and Downloads folders
 ```
 
 ---
@@ -247,10 +176,9 @@ This app is a front end; the real work is done by these projects:
 - **DrumSep** model by its authors, via MSST.
 - **[DeepRhythm](https://github.com/bleugreen/deeprhythm)**: tempo detection.
 - **[Essentia](https://essentia.upf.edu/)** and **essentia.js** by the Music Technology Group, Universitat Pompeu Fabra: key detection.
-- **[madmom](https://github.com/CPJKU/madmom)**: key detection fallback.
 - **[S-KEY](https://github.com/deezer/skey)** by Deezer Research: key detection fallback.
 - **[librosa](https://librosa.org/)**: audio analysis and final fallback.
 - **[pywebview](https://pywebview.flowrl.com/)**: the desktop window.
-- Also: yt-dlp, FFmpeg (imageio-ffmpeg), sounddevice, soundfile, PyTorch.
+- Also: yt-dlp, FFmpeg (imageio-ffmpeg), sounddevice, soundfile, PyTorch, uv, Node.js, and the Inter typeface.
 
 Please respect the licenses of each project and model.

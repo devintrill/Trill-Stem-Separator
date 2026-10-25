@@ -18,3 +18,7 @@ settings.json
 .cache/
 __pycache__/
 stem_splitter_tk_backup.py
+
+# Created by setup
+runtime/
+node_modules/

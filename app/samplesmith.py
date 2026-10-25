@@ -1,9 +1,9 @@
 """
 SampleSmith - a dark-mode window for Music-Source-Separation-Training (MSST).
 
-Keep this file (with its ui and fonts folders) in any folder, e.g. "TRILL STEM SEPARATOR" on the
-Desktop, and launch it with "SampleSmith.bat". MSST must be installed in
-C:\\Music-Source-Separation-Training. Models download automatically the first time you use them.
+Start it with SampleSmith.exe, which runs setup/install.ps1 the first time to put Python, MSST and
+the packages in runtime/. Settings and the log live in %APPDATA%\\SampleSmith. Models download
+automatically the first time you use them.
 
 The window is HTML/CSS (ui/) shown with pywebview (Edge WebView2); everything else runs here.
 """
@@ -31,16 +31,23 @@ for _stream in ("stdout", "stderr"):
         setattr(sys, _stream, open(os.devnull, "w", encoding="utf-8"))
 
 
-# librosa compiles parts of itself with numba on first use; keep that cache next to the app.
-os.environ.setdefault("NUMBA_CACHE_DIR", str(Path(__file__).resolve().parent / ".cache"))
+APP_DIR = Path(__file__).resolve().parent          # app/: this file, ui, fonts, essjs
+ROOT = APP_DIR.parent                              # the folder SampleSmith.exe is in
+RUNTIME = ROOT / "runtime"                         # made by setup: Python, MSST, models, Node
+DATA_DIR = Path(os.environ.get("APPDATA") or Path.home() / ".config") / "SampleSmith"
+CACHE_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".cache") / "SampleSmith"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# librosa compiles parts of itself with numba on first use; keep that cache out of the app folder.
+os.environ.setdefault("NUMBA_CACHE_DIR", str(CACHE_DIR / "numba"))
 
 
-LOG_FILE = Path(__file__).resolve().parent / "trill.log"
+LOG_FILE = DATA_DIR / "samplesmith.log"
 _log_lock = threading.Lock()
 
 
 def file_log(text):
-    """Append to trill.log next to the app (kept under ~1 MB) so problems can be read after the fact."""
+    """Append to samplesmith.log in AppData (kept under ~1 MB) so problems can be read after the fact."""
     try:
         with _log_lock:
             if LOG_FILE.exists() and LOG_FILE.stat().st_size > 1_000_000:
@@ -63,16 +70,18 @@ def fatal(message):
 try:
     import webview
 except ImportError:
-    fatal("The interface package is missing.\n\nStart the app with "
-          "\"SampleSmith.bat\" - it installs it automatically.")
+    fatal("SampleSmith isn't fully set up.\n\nStart it with SampleSmith.exe - it finishes the setup.")
 
 APP_NAME = "SampleSmith"
-APP_DIR = Path(__file__).resolve().parent
-MSST_DIR = Path(r"C:\Music-Source-Separation-Training")
-MODELS_DIR = MSST_DIR / "models"
-DEFAULT_OUT = APP_DIR / "Stems"
-SETTINGS_FILE = APP_DIR / "settings.json"
-DL_DIR = APP_DIR / "Downloads"
+MSST_DIR = RUNTIME / "engine"
+MODELS_DIR = RUNTIME / "models"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+MUSIC = Path.home() / "Music" / APP_NAME
+# Older versions kept settings, stems and downloads in the app folder; keep using them where they exist.
+if not SETTINGS_FILE.exists() and (ROOT / "settings.json").exists():
+    shutil.copy2(ROOT / "settings.json", SETTINGS_FILE)
+DEFAULT_OUT = ROOT / "Stems" if (ROOT / "Stems").is_dir() else MUSIC / "Stems"
+DL_DIR = ROOT / "Downloads" if (ROOT / "Downloads").is_dir() else MUSIC / "Downloads"
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".m4a", ".ogg", ".aiff", ".aif")
 
 REL = "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download"
@@ -288,7 +297,7 @@ ESSENTIA_NOTES = {"Db": "C#", "D#": "Eb", "Gb": "F#", "G#": "Ab", "A#": "Bb"}
 def detect_essentia(y, sr):
     """Key like 'A min' from Essentia, or None if Node/essentia.js is missing, errors or times out."""
     script = APP_DIR / "essjs" / "key.js"
-    node = shutil.which("node") or next((str(p) for p in [Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "nodejs" / "node.exe"] if p.exists()), None)
+    node = find_node()
     if not node or not script.exists():
         file_log("Essentia key skipped: " + ("Node.js not found" if not node else f"{script} missing"))
         return None
@@ -778,7 +787,10 @@ def find_deno():
 
 
 def find_node():
-    """node.exe (installed by the launcher for key detection); yt-dlp can use it instead of Deno."""
+    """node.exe (setup puts one in runtime/node for key detection); yt-dlp can use it instead of Deno."""
+    local = RUNTIME / "node" / "node.exe"
+    if local.exists():
+        return str(local)
     exe = shutil.which("node")
     if exe:
         return exe
@@ -796,25 +808,19 @@ def js_runtimes():
 
 
 def ensure_youtube_support():
-    """YouTube now needs a JavaScript runtime (Node or Deno) and yt-dlp's solver scripts. Installs whatever is
-    missing, once, quietly in the background; downloads keep working meanwhile, just with fewer formats."""
-    if os.name != "nt":
-        return
+    """YouTube keeps changing, so yt-dlp needs updates to keep working. Updates it in the background at
+    most once a week with the uv that setup left in runtime/; downloads keep working meanwhile."""
+    uv, stamp = RUNTIME / "uv" / "uv.exe", DATA_DIR / "yt-dlp-updated"
     try:
-        if not js_runtimes():
-            subprocess.run(["winget", "install", "-e", "--id", "DenoLand.Deno", "--silent",
-                            "--accept-package-agreements", "--accept-source-agreements"],
-                           capture_output=True, timeout=900, creationflags=no_window())
-            file_log("Deno for YouTube: " + ("installed" if find_deno() else "install failed"))
-        import importlib.util
-        if importlib.util.find_spec("yt_dlp_ejs") is None:
-            py = Path(sys.executable).with_name("python.exe")
-            r = subprocess.run([str(py if py.exists() else sys.executable), "-m", "pip", "install", "-q",
-                                "--disable-pip-version-check", "-U", "yt-dlp[default]"],
-                               capture_output=True, text=True, timeout=900, creationflags=no_window())
-            file_log("yt-dlp update for YouTube: " + ("done" if r.returncode == 0 else r.stderr.strip()[-300:]))
+        if not uv.exists() or stamp.exists() and time.time() - stamp.stat().st_mtime < 7 * 86400:
+            return
+        r = subprocess.run([str(uv), "pip", "install", "-q", "--python", console_python(), "-U", "yt-dlp[default]"],
+                           capture_output=True, text=True, timeout=900, creationflags=no_window())
+        file_log("yt-dlp update: " + ("done" if r.returncode == 0 else r.stderr.strip()[-300:]))
+        if r.returncode == 0:
+            stamp.touch()
     except Exception as e:  # never in the way of the app
-        file_log(f"YouTube support setup skipped: {e}")
+        file_log(f"yt-dlp update skipped: {e}")
 
 
 def youtube_download(url, dest_dir, progress, log, fmt="WAV"):
@@ -1137,11 +1143,7 @@ class Engine:
                 self.update_player()
 
     def check_gpu(self):
-        py = MSST_DIR / "venv" / "Scripts" / "python.exe"
-        if not py.exists():
-            self.gpu = ("MSST not found", "bad")
-            self.emit("gpu", self.gpu)
-            return
+        py = console_python()
         try:
             out = subprocess.run(
                 [str(py), "-c", "import torch;print(torch.cuda.get_device_name(0) "
@@ -1165,7 +1167,7 @@ class Engine:
                 self.set_status("Add a sample first", "warn")
                 return
             if not (MSST_DIR / "inference.py").exists():
-                self.set_status(f"Can't find MSST in {MSST_DIR}", "bad")
+                self.set_status("Setup isn't finished. Restart with SampleSmith.exe", "bad")
                 return
             self.save_settings()
             st = self.settings
@@ -1309,7 +1311,7 @@ class Engine:
                                     lambda msg: self.q.put(("log", msg)), fmt)
             self.q.put((done, self.tag_download(path) if done == "yt_saved" else str(path)))
         except ImportError:
-            self.q.put(("yt_fail", "YouTube support isn't installed. Start the app with \"SampleSmith.bat\"."))
+            self.q.put(("yt_fail", "YouTube support isn't installed. Restart with SampleSmith.exe to finish setup."))
         except Exception as e:
             msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
             msg = msg.split("; please report")[0].strip()
