@@ -1,5 +1,5 @@
 @echo off
-title Trill Stem Separator
+title Sample Machine
 set "MSST=C:\Music-Source-Separation-Training"
 set "PY=%MSST%\venv\Scripts\python.exe"
 

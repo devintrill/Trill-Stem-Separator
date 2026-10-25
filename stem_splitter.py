@@ -1,8 +1,8 @@
 """
-Trill Stem Separator - a dark-mode window for Music-Source-Separation-Training (MSST).
+Sample Machine - a dark-mode window for Music-Source-Separation-Training (MSST).
 
 Keep this file (with its ui and fonts folders) in any folder, e.g. "TRILL STEM SEPARATOR" on the
-Desktop, and launch it with "Trill Stem Separator.bat". MSST must be installed in
+Desktop, and launch it with "Sample Machine.bat". MSST must be installed in
 C:\\Music-Source-Separation-Training. Models download automatically the first time you use them.
 
 The window is HTML/CSS (ui/) shown with pywebview (Edge WebView2); everything else runs here.
@@ -54,7 +54,7 @@ def file_log(text):
 def fatal(message):
     if os.name == "nt":
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, message, "Trill Stem Separator", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, "Sample Machine", 0x10)
     else:
         print(message, file=sys.stderr)
     sys.exit(1)
@@ -64,9 +64,9 @@ try:
     import webview
 except ImportError:
     fatal("The interface package is missing.\n\nStart the app with "
-          "\"Trill Stem Separator.bat\" - it installs it automatically.")
+          "\"Sample Machine.bat\" - it installs it automatically.")
 
-APP_NAME = "Trill Stem Separator"
+APP_NAME = "Sample Machine"
 APP_DIR = Path(__file__).resolve().parent
 MSST_DIR = Path(r"C:\Music-Source-Separation-Training")
 MODELS_DIR = MSST_DIR / "models"
@@ -1232,7 +1232,7 @@ class Engine:
                                     lambda msg: self.q.put(("log", msg)), fmt)
             self.q.put((done, self.tag_download(path) if done == "yt_saved" else str(path)))
         except ImportError:
-            self.q.put(("yt_fail", "YouTube support isn't installed. Start the app with \"Trill Stem Separator.bat\"."))
+            self.q.put(("yt_fail", "YouTube support isn't installed. Start the app with \"Sample Machine.bat\"."))
         except Exception as e:
             msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("ERROR: ", "")
             msg = msg.split("; please report")[0].strip()

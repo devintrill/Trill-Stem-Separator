@@ -1,5 +1,20 @@
+# Personal files and output
+Downloads/
 Stems/
-__pycache__/
-*.log
+samples/
+Samples/
+*.wav
+*.mp3
+*.flac
+*.aif
+*.aiff
+*.ogg
+*.m4a
+*.mid
 settings.json
+*.log
+
+# Caches and backups
+.cache/
+__pycache__/
 stem_splitter_tk_backup.py
