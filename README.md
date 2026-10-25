@@ -1,4 +1,4 @@
-# Sample Machine
+# SampleSmith
 
 A dark-mode Windows desktop app for splitting songs and samples into stems (vocals, drums, bass, other and more), with automatic BPM and key detection. Finished stems can be previewed in the app and dragged straight into FL Studio.
 
@@ -6,7 +6,7 @@ A dark-mode Windows desktop app for splitting songs and samples into stems (voca
 
 ## Overview
 
-Sample Machine is a front end for [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (MSST) by ZFTurbo. MSST does the heavy lifting on your GPU; this app gives it a simple window: drop files in, pick a model and a quality level, press go.
+SampleSmith is a front end for [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (MSST) by ZFTurbo. MSST does the heavy lifting on your GPU; this app gives it a simple window: drop files in, pick a model and a quality level, press go.
 
 - The window is HTML/CSS/JS (`ui/`) displayed with **pywebview** using Microsoft Edge **WebView2**.
 - All processing runs in `stem_splitter.py`, using the Python environment that ships with your MSST install.
@@ -102,7 +102,7 @@ Copy the `TRILL STEM SEPARATOR` folder anywhere, for example to your Desktop. Ke
 
 ### 8. First launch
 
-Double-click **`Sample Machine.bat`**. On first run it will:
+Double-click **`SampleSmith.bat`**. On first run it will:
 
 1. Check that the MSST venv exists (and tell you if it does not).
 2. Install the app's Python packages into the MSST venv: pywebview, pythonnet, sounddevice, soundfile, yt-dlp, imageio-ffmpeg, librosa.
@@ -218,7 +218,7 @@ Install or repair the Microsoft Edge WebView2 Runtime.
 
 ```
 TRILL STEM SEPARATOR\
-  Sample Machine.bat   Launcher: checks and installs dependencies, then starts the app
+  SampleSmith.bat   Launcher: checks and installs dependencies, then starts the app
   stem_splitter.py           The app: separation, detection, player, window backend
   settings.json              Your saved choices (created automatically)
   trill.log                  Log file (created automatically)

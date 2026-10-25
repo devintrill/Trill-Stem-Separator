@@ -212,22 +212,25 @@
   }
 
   /* ---------- YouTube ---------- */
+  // Only touch what changed, so the busy button's flowing fill doesn't restart on every progress tick.
   function setYt(y) {
     S.yt = y;
     const add = $('yt-add'), dl = $('yt-dl'), active = y.save ? dl : add;
+    const slow = y.label === 'Analyzing' || y.label === 'Converting';
     for (const b of [add, dl]) {
-      b.disabled = y.busy; b.classList.remove('busy', 'analyzing'); b.style.setProperty('--p', 0);
-      b.querySelector('.lbl').textContent = b === add ? 'Add' : 'Download';
+      const on = !!y.busy && b === active, lbl = b.querySelector('.lbl');
+      b.disabled = !!y.busy;
+      b.classList.toggle('busy', on);
+      b.classList.toggle('analyzing', on && slow);
+      const text = on && y.label ? y.label : (b === add ? 'Add' : 'Download');
+      if (lbl.textContent !== text) lbl.textContent = text;
+      const pct = String(on ? (y.pct != null ? y.pct : slow ? 1 : 0) : 0);
+      if (b.style.getPropertyValue('--p') !== pct) b.style.setProperty('--p', pct);
     }
-    $('yt').disabled = y.busy;
-    if (y.busy) {
-      active.classList.add('busy');
-      if (y.label) active.querySelector('.lbl').textContent = y.label;
-      active.classList.toggle('analyzing', y.label === 'Analyzing' || y.label === 'Converting');
-      active.style.setProperty('--p', y.pct != null ? y.pct : (y.label === 'Analyzing' || y.label === 'Converting') ? 1 : 0);
-    }
+    $('yt').disabled = !!y.busy;
     if (y.clear) $('yt').value = '';
   }
+
 
   /* ---------- stems + preview ---------- */
   let resultSel;

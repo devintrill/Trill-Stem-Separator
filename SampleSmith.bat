@@ -1,5 +1,5 @@
 @echo off
-title Sample Machine
+title SampleSmith
 set "MSST=C:\Music-Source-Separation-Training"
 set "PY=%MSST%\venv\Scripts\python.exe"
 
