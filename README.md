@@ -18,7 +18,7 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 ## Features
 
 - **Drag and drop** audio files (WAV, FLAC, MP3, M4A, OGG, AIFF) onto the window, or paste a YouTube link to download and queue a track.
-- **Several separation models**, from a 6-stem split to a drum-kit splitter (see the guide below).
+- **Two separation models**: BS-RoFormer SW (6 stems) and HTDemucs FT (see the guide below).
 - **Three quality levels**: Fast, High and Best (test-time augmentation).
 - **BPM detection** with DeepRhythm. When the tempo is ambiguous, a second guess is shown, e.g. `140 / 70`.
 - **Key detection** with Essentia's KeyExtractor, shown together with its relative key, e.g. `A min / C maj`.
@@ -75,8 +75,6 @@ Settings (model, quality, format, output folder, options) are remembered in `set
 |---|---|---|
 | **BS-RoFormer SW** (default) | Vocals, drums, bass, other, guitar, piano | Highest-scoring multi-stem model you can download. The best everyday choice. |
 | **HTDemucs FT** | Vocals, drums, bass, other | Same model as UVR's `htdemucs_ft` (four fine-tuned specialists). Good second opinion. |
-| **HTDemucs 6s** | Vocals, drums, bass, other, guitar, piano | Adds guitar and piano. Those two stems can be messy. |
-| **DrumSep** | Kick, snare, toms, cymbals | Feed it a **drums stem**, not a full mix. Key detection is skipped (drums have no key). |
 
 Model weights download automatically into `runtime\models` the first time each one is used.
 
@@ -169,9 +167,8 @@ Music\SampleSmith\      Default Stems and Downloads folders
 This app is a front end; the real work is done by these projects:
 
 - **[Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)** by ZFTurbo: training and inference framework, plus many of the model weights.
-- **[Demucs / HTDemucs](https://github.com/facebookresearch/demucs)** by Meta Research: HTDemucs FT, HTDemucs 6s.
+- **[Demucs / HTDemucs](https://github.com/facebookresearch/demucs)** by Meta Research: HTDemucs FT.
 - **BS-RoFormer SW** via [python-audio-separator](https://github.com/nomadkaraoke/python-audio-separator).
-- **DrumSep** model by its authors, via MSST.
 - **[DeepRhythm](https://github.com/bleugreen/deeprhythm)**: tempo detection.
 - **[Essentia](https://essentia.upf.edu/)** and **essentia.js** by the Music Technology Group, Universitat Pompeu Fabra: key detection.
 - **[S-KEY](https://github.com/deezer/skey)** by Deezer Research: key detection fallback.

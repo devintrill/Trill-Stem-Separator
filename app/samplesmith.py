@@ -114,21 +114,6 @@ MODELS = {
         "has_drums": True,
         "parts": HTDEMUCS_FT,
     },
-    "HTDemucs 6 stems": {
-        "desc": "Adds piano and guitar stems. Those two can be messy.",
-        "has_drums": True,
-        "parts": [{"folder": "htdemucs_6s", "type": "htdemucs",
-                   "config": f"{RAW}/config_htdemucs_6stems.yaml",
-                   "weights": f"{DEMUCS}/5c90dfd2-34c22ccb.th"}],
-    },
-    "DrumSep": {
-        "desc": "Feed it a DRUMS stem: splits into kick, snare, toms, cymbals.",
-        "has_drums": False,
-        "key": False,  # drums have no musical key
-        "parts": [{"folder": "drumsep_htdemucs", "type": "htdemucs",
-                   "config": f"{RAW}/config_drumsep.yaml",
-                   "weights": f"{REL}/v1.0.5/model_drumsep.th"}],
-    },
 }
 
 # Quality presets: overlap = MSST num_overlap (each sample is processed this many times;
