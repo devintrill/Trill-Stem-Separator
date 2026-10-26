@@ -107,11 +107,13 @@ MODELS = {
     "BS-RoFormer SW": {
         "desc": "Vocals, drums, bass, other, guitar, piano. Best all-round 6-stem model.",
         "has_drums": True,
+        "stems": ["vocals", "drums", "bass", "guitar", "piano", "other"],  # shown as empty pads before a run
         "parts": [BS_ROFORMER_SW],
     },
     "HTDemucs FT": {
         "desc": "Vocals, drums, bass, other. Same as UVR's htdemucs_ft.",
         "has_drums": True,
+        "stems": ["vocals", "drums", "bass", "other"],
         "parts": HTDEMUCS_FT,
     },
 }
@@ -311,6 +313,16 @@ def open_folder(path):
         os.startfile(path)
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def recycle(path):
+    """Send a file to the Recycle Bin, so a stem removed by mistake can be restored. Windows only."""
+    if os.name != "nt" or not Path(path).exists():
+        return
+    import clr
+    clr.AddReference("Microsoft.VisualBasic")
+    from Microsoft.VisualBasic.FileIO import FileSystem, RecycleOption, UIOption
+    FileSystem.DeleteFile(str(path), UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin)
 
 
 def load_settings():
@@ -687,6 +699,14 @@ def primary(v):
 
 def tag_text(bpm, key, sep=" - "):
     return sep.join(t for t in (f"{bpm} BPM" if bpm else "", key or "") if t)
+
+
+TAG_SUFFIX = re.compile(r"( - \d+(\.\d+)? BPM)?( - [A-G][#b]? (maj|min))?$")
+
+
+def untagged(name):
+    """'Soul Loop - 90 BPM - A min' -> 'Soul Loop': a tagged download's name, so stems don't repeat the tag."""
+    return TAG_SUFFIX.sub("", name) or name
 
 
 def stem_filename(sample, instr, ext, bpm=None, key=None):
@@ -1151,7 +1171,6 @@ class Engine:
         self.load_token = 0
         self.player_state = None
         self.yt_busy = False
-        self.yt_save, self.yt_fmt = False, "WAV"
         self.detected = {}  # sample path -> (bpm, key) from the background detector
         self.pending = set()  # sample paths waiting for (or in) background detection
         self.failed = set()  # sample paths whose detection raised
@@ -1181,7 +1200,7 @@ class Engine:
     def snapshot(self):
         with self.lock:
             return {
-                "models": [{"name": n, "drums": m["has_drums"]} for n, m in MODELS.items()],
+                "models": [{"name": n, "drums": m["has_drums"], "stems": m["stems"]} for n, m in MODELS.items()],
                 "qualities": list(QUALITY), "formats": list(FORMATS),
                 "settings": dict(self.settings), "files": self.file_rows(),
                 "status": self.status, "gpu": self.gpu, "log": self.log_lines[-500:],
@@ -1206,7 +1225,7 @@ class Engine:
         return {"running": self.running, "started": self.started_at * 1000}
 
     def yt_state(self):
-        return {"busy": self.yt_busy, "save": self.yt_save}
+        return {"busy": self.yt_busy}
 
     def result_rows(self):
         return {"selected": self.selected,
@@ -1367,8 +1386,6 @@ class Engine:
                             self.on_yt_progress(*value)
                         elif kind == "yt_done":
                             self.on_yt_done(value)
-                        elif kind == "yt_saved":
-                            self.on_yt_saved(value)
                         elif kind == "yt_fail":
                             self.on_yt_fail(value)
                         elif kind == "done":
@@ -1511,6 +1528,28 @@ class Engine:
                 self.load_token += 1
                 threading.Thread(target=self.load_worker, args=(self.load_token, r["files"]), daemon=True).start()
 
+    def remove_stem(self, index, instr):
+        """Take one stem off a result and send its file to the Recycle Bin."""
+        with self.lock:
+            if not 0 <= index < len(self.results) or instr not in self.results[index]["files"]:
+                return
+            r = self.results[index]
+            path = r["files"].pop(instr)
+            self.mixer.unload()
+            if not r["files"]:
+                self.results.pop(index)
+            try:
+                recycle(path)
+                if not self.running:
+                    self.set_status(f"Moved {instr.title()} to the Recycle Bin")
+            except Exception as e:
+                self.log_line(f"Couldn't move {Path(path).name} to the Recycle Bin ({e}).")
+            if self.results:
+                self.select_result(min(index, len(self.results) - 1))
+            else:
+                self.emit("results", self.result_rows())
+                self.update_player(force=True)
+
     def load_worker(self, token, files):
         names = [k for k in files if k != "no drums"]
         try:
@@ -1562,7 +1601,7 @@ class Engine:
             self.emit("player", row)
 
     # ---------- YouTube ----------
-    def add_youtube(self, url, save=False):
+    def add_youtube(self, url):
         with self.lock:
             url = (url or "").strip()
             if self.yt_busy or not url:
@@ -1573,17 +1612,19 @@ class Engine:
                 return
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
-            self.yt_busy, self.yt_save, self.yt_fmt = True, bool(save), self.settings["format"] if save else "WAV"
-            self.emit("yt", dict(self.yt_state(), label="0%"))
-            args = (url, self.settings["out"], self.yt_fmt, "yt_saved") if save else (url,)
-            threading.Thread(target=self.yt_worker, args=args, daemon=True).start()
+            self.yt_busy = True
+            # looking the video up (and YouTube's JS check) takes most of the wait; the download itself is quick
+            self.emit("yt", dict(self.yt_state(), label="Fetching"))
+            if not self.running:
+                self.set_status("Fetching from YouTube...")
+            threading.Thread(target=self.yt_worker, args=(url,), daemon=True).start()
 
-    def yt_worker(self, url, dest=DL_DIR, fmt="WAV", done="yt_done"):
+    def yt_worker(self, url):
         try:
-            path = youtube_download(url, dest,
+            path = youtube_download(url, DL_DIR,
                                     lambda pct, phase: self.q.put(("yt_progress", (pct, phase))),
-                                    lambda msg: self.q.put(("log", msg)), fmt)
-            self.q.put((done, self.tag_download(path) if done == "yt_saved" else str(path)))
+                                    lambda msg: self.q.put(("log", msg)), "WAV")
+            self.q.put(("yt_done", self.tag_download(path)))
         except ImportError:
             self.q.put(("yt_fail", "YouTube support isn't installed. Restart with SampleSmith.exe to finish setup."))
         except Exception as e:
@@ -1592,7 +1633,8 @@ class Engine:
             self.q.put(("yt_fail", f"YouTube download failed: {msg[:160]}"))
 
     def tag_download(self, path):
-        """Rename a Download-only file to 'Title - 90 BPM - A min.ext'. Returns (path, bpm, key)."""
+        """Detect BPM/key of a fresh download and rename it to 'Title - 90 BPM - A min.wav', so there is one
+        file and its name says what it is. Returns (path, bpm, key)."""
         self.q.put(("yt_progress", (1.0, "analyze")))
         try:
             with self.detect_lock:
@@ -1611,7 +1653,7 @@ class Engine:
         elif phase == "download":
             label, status = f"{pct * 100:.0f}%", "Downloading from YouTube..."
         else:
-            label, status = "Converting", f"Converting to {self.yt_fmt}..."
+            label, status = "Converting", "Converting to WAV..."
         self.emit("yt", dict(self.yt_state(), label=label, pct=pct if phase == "download" else None))
         if not self.running:
             self.set_status(status)
@@ -1620,25 +1662,14 @@ class Engine:
         self.yt_busy = False
         self.emit("yt", dict(self.yt_state(), clear=clear))
 
-    def on_yt_done(self, path):
+    def on_yt_done(self, value):
+        path, bpm, key = value
         self.yt_reset(clear=True)
         self.log_line(f"Downloaded {Path(path).name}")
         if not self.running:
-            self.set_status(f"Added {Path(path).stem}", "good")
+            self.set_status(f"Added {untagged(Path(path).stem)}", "good")
+        self.info[path] = self.detected[path] = (bpm, key)  # already detected, so it isn't queued again
         self.add_paths([path])
-
-    def on_yt_saved(self, value):
-        path, bpm, key = value
-        self.yt_reset(clear=True)
-        self.log_line(f"Saved {path}")
-        name, tag = Path(path).stem, tag_text(bpm, key)
-        if tag and name.endswith(" - " + tag):
-            name = name[:-len(tag) - 3]
-        if not self.running:
-            self.set_status(f"Saved {name}" + (f"  ·  {tag_text(bpm, key, sep='  ·  ')}" if tag else ""), "good")
-        r = {"name": name, "tag": tag_text(bpm, key, sep="  ·  "), "bpm": bpm, "key": key,
-             "files": {Path(path).suffix[1:].upper(): path}}
-        self.set_results([r] + [x for x in self.results if x["files"] != r["files"]])
 
     def on_yt_fail(self, msg):
         self.yt_reset()
@@ -1909,11 +1940,12 @@ class Engine:
                 key = None
             self.q.put(("status", "Saving stems..."))
 
-            dest = s["out"] / stem_name
+            base = untagged(stem_name)  # a renamed YouTube download already carries its BPM/key
+            dest = s["out"] / base
             dest.mkdir(parents=True, exist_ok=True)
             saved = {}
             for instr, data in final.items():
-                path = dest / stem_filename(stem_name, instr, ext, bpm, key)
+                path = dest / stem_filename(base, instr, ext, bpm, key)
                 if mp3:
                     sf.write(path, np.clip(data, -1.0, 1.0), sr, format="MP3",
                              bitrate_mode="CONSTANT", compression_level=0.0)  # 320 kbps
@@ -1922,7 +1954,7 @@ class Engine:
                 else:
                     sf.write(path, data, sr, subtype="FLOAT")
                 saved[instr] = str(path)
-            results.append({"name": stem_name, "tag": tag_text(bpm, key, sep="  ·  "), "bpm": bpm, "key": key,
+            results.append({"name": base, "tag": tag_text(bpm, key, sep="  ·  "), "bpm": bpm, "key": key,
                             "files": dict(sorted(saved.items(), key=lambda kv: stem_sort_key(kv[0])))})
             self.q.put(("log", f"Saved {len(final)} stems for {src.name} -> {dest}"))
 
@@ -1931,20 +1963,20 @@ class Engine:
 # ---------- window ----------
 UI_DIR = APP_DIR / "ui"
 FONT_DIR = APP_DIR / "fonts"
-FONT_FAMILY = "Inter"
-FONT_FILES = (("Inter-300.woff2", 300), ("Inter-400.woff2", 400), ("Inter-500.woff2", 500))
+FONT_FILES = (("Inter-300.woff2", "Inter", 300), ("Inter-400.woff2", "Inter", 400), ("Inter-500.woff2", "Inter", 500),
+              ("InstrumentSans-700.woff2", "Instrument Sans", 700))  # Instrument Sans: the wordmark only
 
 
 def build_page():
     """One self-contained page: the ui/ files inlined, the font embedded, so nothing loads from disk later."""
     html = (UI_DIR / "index.html").read_text(encoding="utf-8")
     faces = []
-    for name, weight in FONT_FILES:
+    for name, family, weight in FONT_FILES:
         f = FONT_DIR / name
         if f.exists():
             data = base64.b64encode(f.read_bytes()).decode("ascii")
             kind = "woff2" if f.suffix == ".woff2" else "truetype"
-            faces.append(f"@font-face{{font-family:'{FONT_FAMILY}';font-weight:{weight};font-style:normal;"
+            faces.append(f"@font-face{{font-family:'{family}';font-weight:{weight};font-style:normal;"
                          f"src:url(data:font/{f.suffix[1:]};base64,{data}) format('{kind}');}}")
     css = "\n".join(faces) + "\n" + (UI_DIR / "app.css").read_text(encoding="utf-8")
     js = (UI_DIR / "app.js").read_text(encoding="utf-8")
@@ -1991,6 +2023,10 @@ class Api:
 
     def __init__(self, engine, bridge):
         self._engine, self._bridge = engine, bridge
+        # A stem drag started here is in progress (or just ended); drops onto the window are ignored meanwhile,
+        # with a second of grace because the page's drop event can reach Python after the drag returns.
+        self.dragging_out = False
+        self.drag_quiet_until = 0.0
 
     def ready(self):
         self._bridge.ready = True
@@ -2031,8 +2067,8 @@ class Api:
     def clear_files(self):
         self._engine.clear_files()
 
-    def add_youtube(self, url, save=False):
-        self._engine.add_youtube(url, save)
+    def add_youtube(self, url):
+        self._engine.add_youtube(url)
 
     def start(self):
         self._engine.start()
@@ -2045,6 +2081,9 @@ class Api:
 
     def toggle_strip(self, which, name):
         self._engine.toggle_strip(which, name)
+
+    def remove_stem(self, index, instr):
+        self._engine.remove_stem(int(index), instr)
 
     def toggle_play(self):
         self._engine.toggle_play()
@@ -2068,7 +2107,12 @@ class Api:
             def run():
                 data = DataObject(DataFormats.FileDrop, Array[String](paths))
                 form.DoDragDrop(data, DragDropEffects.Copy)
-            form.Invoke(Action(run))
+            self.dragging_out = True
+            try:
+                form.Invoke(Action(run))  # returns once the drag is dropped or cancelled
+            finally:
+                self.dragging_out = False
+                self.drag_quiet_until = time.monotonic() + 1.0
             return True
         except Exception as e:
             self._engine.q.put(("log", f"Couldn't start the drag ({e})."))
@@ -2096,7 +2140,7 @@ def set_icon(window):
 
 
 def dark_title_bar(window):
-    """Paint the Windows title bar the page's navy instead of the accent colour (Windows 11; dark on 10)."""
+    """Paint the Windows title bar the page's background instead of the accent colour (Windows 11; dark on 10)."""
     if os.name != "nt":
         return
     try:
@@ -2104,8 +2148,8 @@ def dark_title_bar(window):
         hwnd = ctypes.c_void_p(window.native.Handle.ToInt64())
         dwm = ctypes.windll.dwmapi
         for attr, value in ((20, 1), (19, 1),            # immersive dark mode (new id, then pre-20H1 id)
-                            (35, 0x00130C0A),            # caption colour  #0a0c13 (COLORREF is 0x00BBGGRR)
-                            (34, 0x00241A16),            # border colour   #161a24
+                            (35, 0x00120D0D),            # caption colour  #0d0d12 (COLORREF is 0x00BBGGRR)
+                            (34, 0x00120D0D),            # border colour   #0d0d12
                             (36, 0x00EDEDED)):           # caption text    #ededed
             v = ctypes.c_int(value)
             dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v))
@@ -2126,10 +2170,12 @@ def main():
     engine = Engine(bridge.emit)
     api = Api(engine, bridge)
     window = webview.create_window(APP_NAME, html=build_page(), js_api=api, width=1080, height=820,
-                                   min_size=(900, 700), background_color="#0a0c13", text_select=False)
+                                   min_size=(900, 700), background_color="#0d0d12", text_select=False)
     bridge.window = window
 
     def on_drop(e, *_):
+        if api.dragging_out or time.monotonic() < api.drag_quiet_until:  # a stem let go over the window itself
+            return
         files = (e.get("dataTransfer") or {}).get("files") or []
         engine.add_paths([f["pywebviewFullPath"] for f in files if f.get("pywebviewFullPath")])
 

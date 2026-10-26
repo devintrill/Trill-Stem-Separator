@@ -55,7 +55,7 @@ Separation models download automatically the first time you use each one.
 
 ## Usage
 
-1. **Add audio.** Drag files onto the drop area, or paste a YouTube link and add it to the queue (or just download it, tagged with BPM and key).
+1. **Add audio.** Drag files onto the drop area, or paste a YouTube link and press Add. A YouTube track is saved once, as a WAV named with its BPM and key, and like any sample you can drag it straight into FL Studio without separating it.
 2. **Pick a model.** The default is BS-RoFormer SW. A short description appears under the selector.
 3. **Pick a quality.** Fast, High or Best.
 4. **Pick a format.** WAV (32-bit float) or MP3 (320 kbps).
@@ -148,7 +148,7 @@ SampleSmith\
   app\
     samplesmith.py     The app: separation, detection, player, window backend
     ui\                Window layout, styling and behaviour
-    fonts\             Inter (SIL Open Font License)
+    fonts\             Inter, and Instrument Sans for the wordmark (SIL Open Font License)
     essjs\             Node.js helper for Essentia key detection
   setup\
     install.ps1        One-click setup
@@ -174,6 +174,6 @@ This app is a front end; the real work is done by these projects:
 - **[S-KEY](https://github.com/deezer/skey)** by Deezer Research: key detection fallback.
 - **[librosa](https://librosa.org/)**: audio analysis and final fallback.
 - **[pywebview](https://pywebview.flowrl.com/)**: the desktop window.
-- Also: yt-dlp, FFmpeg (imageio-ffmpeg), sounddevice, soundfile, PyTorch, uv, Node.js, and the Inter typeface.
+- Also: yt-dlp, FFmpeg (imageio-ffmpeg), sounddevice, soundfile, PyTorch, uv, Node.js, and the Inter and Instrument Sans typefaces.
 
 Please respect the licenses of each project and model.

@@ -4,9 +4,9 @@
   const api = () => window.pywebview.api;
   const call = (name, ...args) => { try { return api()[name](...args); } catch (e) { return Promise.resolve(); } };
   const svg = (inner, vb = '0 0 24 24') => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', vb); s.innerHTML = inner; return s; };
-  const ICON_NOTE = '<path d="M9 17.5a2.5 2.5 0 11-2-2.45V5.5l11-2v11a2.5 2.5 0 11-2-2.45V7.1l-7 1.27z"/>';
   const ICON_X = '<path d="M6 6l12 12M18 6L6 18"/>';
   const ICON_GRIP = '<circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>';
+  const title = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
 
   const S = { settings: {}, models: [], running: false, started: 0, results: { items: [], selected: 0 },
               player: { ready: false, playing: false, pos: 0, length: 0, solo: [], mute: [] }, playerAt: 0,
@@ -94,6 +94,7 @@
     sw.classList.toggle('on', !!st.nodrums && !!drums);
     $('out').textContent = '‎' + (st.out || '');
     $('out').title = st.out || '';
+    renderPending();
   }
 
   /* ---------- files ---------- */
@@ -109,10 +110,14 @@
       let r = rows.get(f.path);
       if (!r) {
         r = el('div', 'file');
-        const note = svg(ICON_NOTE); note.classList.add('note');
+        const grip = el('span', 'grip'); grip.append(svg(ICON_GRIP));
         const x = el('button', 'x'); x.append(svg(ICON_X)); x.title = 'Remove';
         x.addEventListener('click', () => call('remove_file', f.path));
-        r.append(note, el('span', 'name', f.name), el('span', 'tags'), el('span', 'size', f.size), x);
+        x.addEventListener('pointerdown', (e) => e.stopPropagation());
+        r.append(grip, el('span', 'name', f.name), el('span', 'tags'), el('span', 'size', f.size), x);
+        // the original can go straight into the DAW too, e.g. a YouTube rip you don't want split
+        r.title = 'Drag into FL Studio';
+        dragOut(r, () => [f.path]);
         rows.set(f.path, r);
       }
       fillTags(r.querySelector('.tags'), f);
@@ -137,54 +142,62 @@
   let booted = false;
   function setStatus([text, tone]) {
     const s = $('status');
-    if (booted && tone === 'good' && s.textContent !== text) confetti();
+    if (booted && tone === 'good' && s.textContent !== text) confetti(S.finishedBy);
     s.textContent = text; s.className = 'status ' + (tone || '');
   }
 
-  /* ---------- confetti: a soft burst behind the panels when something finishes ---------- */
+  /* ---------- logo: the pad mark doubles as the app's status ---------- */
+  // ready: one pad lit. working: the light steps around the grid. nogpu: none lit.
+  const tones = { gpu: '' };
+  function renderLogo() {
+    const state = S.running || S.yt.busy ? 'working' : tones.gpu === 'warn' ? 'nogpu' : 'ready';
+    const logo = $('logo');
+    if (logo.dataset.state !== state) logo.dataset.state = state;
+  }
+
+  /* ---------- confetti: one short pop of gold paper strips out of the button whose job just finished ---------- */
+  // Thin strips, strong air drag: they stop quickly, then tumble and drift down like real paper.
   const confetti = (() => {
     const cv = document.createElement('canvas'); cv.className = 'confetti';
     document.body.insertBefore(cv, document.querySelector('.shell'));
-    const ctx = cv.getContext('2d'), colors = ['#ffffff', '#f3dfa6', '#eab6ff', '#9fe7f5', '#c9c3ff'];
+    const ctx = cv.getContext('2d'), colors = ['#f3c94a', '#f6d261', '#efc23a', '#e2b33a', '#f7da7a', '#d9a92e', '#fbe39a'];
     let parts = [], raf = 0, last = 0;
     function frame(t) {
       const dt = Math.min(0.033, last ? (t - last) / 1000 : 0.016); last = t;
       const dpr = window.devicePixelRatio || 1, W = innerWidth, H = innerHeight;
       if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
-      parts = parts.filter((q) => q.life > 0 && q.y < H + 40);
+      parts = parts.filter((q) => q.life > 0 && q.y < H + 20);
       for (const q of parts) {
-        q.vy += 1100 * dt; q.vx *= 1 - 1.1 * dt; q.vy *= 1 - 1.1 * dt;
-        q.x += (q.vx + Math.sin(t / 300 + q.seed) * 30) * dt; q.y += q.vy * dt;
+        q.vy += 900 * dt; q.vx *= 1 - 2.6 * dt; q.vy *= 1 - 2.6 * dt;  // heavy drag caps the fall speed
+        q.x += (q.vx + Math.sin(t / 260 + q.seed) * 22) * dt; q.y += q.vy * dt;
         q.rot += q.spin * dt; q.flip += q.flipV * dt; q.life -= dt;
-        ctx.save(); ctx.globalAlpha = Math.min(1, q.life / 0.8);
+        ctx.save(); ctx.globalAlpha = Math.min(1, q.life / 0.5);
         ctx.translate(q.x, q.y); ctx.rotate(q.rot); ctx.scale(1, Math.cos(q.flip));
         ctx.fillStyle = q.c;
-        if (q.round) { ctx.beginPath(); ctx.arc(0, 0, q.s * 0.45, 0, Math.PI * 2); ctx.fill(); }
-        else { ctx.beginPath(); ctx.roundRect(-q.s / 2, -q.s / 4, q.s, q.s / 2, 1.5); ctx.fill(); }
+        ctx.fillRect(-q.w / 2, -q.h / 2, q.w, q.h);
         ctx.restore();
       }
       raf = parts.length ? requestAnimationFrame(frame) : 0;
       if (!raf) { last = 0; ctx.clearRect(0, 0, W, H); }
     }
-    return () => {
+    return (from) => {
       if (reduceMotion) return;
-      const W = innerWidth, H = innerHeight;
-      for (const [ox, dir] of [[W * 0.18, 1], [W * 0.82, -1]]) {
-        for (let i = 0; i < 45; i++) {
-          const a = (-90 + dir * (8 + Math.random() * 30)) * Math.PI / 180, v = 1500 + Math.random() * 900;
-          parts.push({ x: ox, y: H + 10, vx: Math.cos(a) * v, vy: Math.sin(a) * v, s: 12 + Math.random() * 16,
-            c: colors[(Math.random() * colors.length) | 0], round: Math.random() < 0.3, rot: Math.random() * 6,
-            spin: (Math.random() - 0.5) * 10, flip: Math.random() * 6, flipV: 4 + Math.random() * 8,
-            seed: Math.random() * 10, life: 2.4 + Math.random() * 1.2 });
-        }
+      const r = (from || $('go')).getBoundingClientRect(), ox = r.left + r.width / 2, oy = r.top + 6;
+      for (let i = 0; i < 38; i++) {
+        const a = (-90 + (Math.random() - 0.5) * 80) * Math.PI / 180, v = 700 + Math.random() * 500;
+        parts.push({ x: ox + (Math.random() - 0.5) * r.width * 0.6, y: oy, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+          w: 3 + Math.random() * 1.5, h: 8 + Math.random() * 4, c: colors[(Math.random() * colors.length) | 0],
+          rot: Math.random() * 6, spin: (Math.random() - 0.5) * 8, flip: Math.random() * 6, flipV: 6 + Math.random() * 8,
+          seed: Math.random() * 10, life: 1.6 + Math.random() * 0.7 });
       }
       if (!raf) raf = requestAnimationFrame(frame);
     };
   })();
-  function setGpu([text, tone]) { const g = $('gpu'); g.className = 'pill gpu ' + (tone || ''); g.querySelector('span').textContent = text; }
+  function setGpu([text, tone]) { const g = $('gpu'); g.className = 'pill gpu ' + (tone || ''); g.querySelector('span').textContent = text; tones.gpu = tone || ''; renderLogo(); }
   const fmt = (s) => { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
   function setRun(run) {
+    if (S.running && !run.running) S.finishedBy = $('go');  // the "Done!" that follows pops out of Separate
     S.running = run.running;
     if (run.started) S.started = run.started;
     document.body.classList.toggle('locked', S.running);
@@ -194,8 +207,15 @@
     $('stop').disabled = !S.running;
     $('yt').disabled = S.yt.busy;
     tickElapsed();
+    renderLogo(); renderPending();
   }
-  function tickElapsed() { if (S.started) $('elapsed').textContent = fmt((Date.now() - S.started) / 1000); }
+  function tickElapsed() {
+    if (!S.started) return;
+    const secs = (Date.now() - S.started) / 1000, p = S.progress;
+    // a rough time left once there's enough progress to go on
+    const left = S.running && p > 0.05 && p < 1 ? ` · ${fmt(secs * (1 - p) / p)} left` : '';
+    $('elapsed').textContent = fmt(secs) + left;
+  }
   setInterval(() => S.running && tickElapsed(), 500);
 
   function addLog(line) {
@@ -214,21 +234,20 @@
   /* ---------- YouTube ---------- */
   // Only touch what changed, so the busy button's flowing fill doesn't restart on every progress tick.
   function setYt(y) {
+    if (S.yt.busy && !y.busy) S.finishedBy = $('yt-add');  // and "Added ..." out of Add
     S.yt = y;
-    const add = $('yt-add'), dl = $('yt-dl'), active = y.save ? dl : add;
-    const slow = y.label === 'Analyzing' || y.label === 'Converting';
-    for (const b of [add, dl]) {
-      const on = !!y.busy && b === active, lbl = b.querySelector('.lbl');
-      b.disabled = !!y.busy;
-      b.classList.toggle('busy', on);
-      b.classList.toggle('analyzing', on && slow);
-      const text = on && y.label ? y.label : (b === add ? 'Add' : 'Download');
-      if (lbl.textContent !== text) lbl.textContent = text;
-      const pct = String(on ? (y.pct != null ? y.pct : slow ? 1 : 0) : 0);
-      if (b.style.getPropertyValue('--p') !== pct) b.style.setProperty('--p', pct);
-    }
+    const b = $('yt-add'), lbl = b.querySelector('.lbl'), on = !!y.busy;
+    const slow = ['Fetching', 'Converting', 'Analyzing'].includes(y.label);  // no percentage: a full, flowing fill
+    b.disabled = on;
+    b.classList.toggle('busy', on);
+    b.classList.toggle('analyzing', on && slow);
+    const text = on && y.label ? y.label : 'Add';
+    if (lbl.textContent !== text) lbl.textContent = text;
+    const pct = String(on ? (y.pct != null ? y.pct : slow ? 1 : 0) : 0);
+    if (b.style.getPropertyValue('--p') !== pct) b.style.setProperty('--p', pct);
     $('yt').disabled = !!y.busy;
     if (y.clear) $('yt').value = '';
+    renderLogo();
   }
 
 
@@ -239,16 +258,19 @@
     const shown = res.items[res.selected] && res.items[res.selected].name;
     if (shown !== waves.of) waves = { of: shown, names: [], peaks: [] };
     const box = $('stems');
-    if (!res.items.length) { box.hidden = true; return; }
-    box.hidden = false;
+    box.classList.toggle('empty', !res.items.length);
+    if (!res.items.length) { renderPending(); return; }
     resultSel.set(res.items.map((r, i) => ({ value: i, label: r.name })), res.selected);
     const r = res.items[res.selected] || res.items[0];
     fillTags($('result-tags'), { bpm: r.bpm, key: r.key, done: true });
     $('strips').classList.toggle('single', r.files.length === 1);
+    $('strips').dataset.sig = '';
     $('strips').replaceChildren(...r.files.map((f, i) => {
-      const s = el('div', 'strip drag'); s.dataset.name = f.instr; s.style.animationDelay = (i * 35) + 'ms';
+      const s = el('div', 'strip drag'); s.dataset.name = f.instr; s.style.animationDelay = (i * 110) + 'ms';
       s.title = 'Drag into FL Studio · double-click to show the file';
-      const nm = el('div', 'nm'); nm.append(svg(ICON_GRIP), document.createTextNode(f.instr.replace(/\b\w/g, (c) => c.toUpperCase())));
+      const grip = el('span', 'grip'); grip.append(svg(ICON_GRIP));
+      const nm = el('div', 'nm'); nm.append(grip, el('span', 'label', title(f.instr)));
+      const top = el('div', 'top');
       const row = el('div', 'sm-row');
       if (f.instr === 'no drums' || r.files.length === 1) row.classList.add('blank');
       else for (const which of ['solo', 'mute']) {
@@ -257,7 +279,14 @@
         b.addEventListener('pointerdown', (e) => e.stopPropagation());
         row.append(b);
       }
-      s.append(nm, row);
+      top.append(nm, row);
+      // x: the stem's file goes to the Recycle Bin
+      const rm = el('button', 'rm'); rm.append(svg(ICON_X));
+      rm.setAttribute('aria-label', `Remove ${title(f.instr)}`);
+      rm.title = 'Move to the Recycle Bin';
+      rm.addEventListener('click', (e) => { e.stopPropagation(); call('remove_stem', res.selected, f.instr); });
+      rm.addEventListener('pointerdown', (e) => e.stopPropagation());
+      s.append(top, rm);
       dragOut(s, () => [f.path]);
       s.addEventListener('dblclick', () => call('open_folder_of', f.path));
       return s;
@@ -266,7 +295,25 @@
     drawWaves();
   }
 
-  /* ---------- stem waveforms: a slim band along the bottom of each strip, lit up to the playhead ---------- */
+  // Before the first result: sunken, empty pads for the stems the chosen model will make, so the
+  // window keeps its layout when the real (raised) pads arrive.
+  function renderPending() {
+    const m = S.models.find((x) => x.name === S.settings.model);
+    if (S.results.items.length || !m) return;
+    const names = [...m.stems, ...(S.settings.nodrums && m.drums ? ['no drums'] : [])];
+    $('stems-hint').textContent = S.running ? `${names.length} on the way` : 'Your stems land here';
+    const strips = $('strips'), sig = names.join('|');
+    if (strips.dataset.sig === sig) return;
+    strips.dataset.sig = sig;
+    strips.classList.remove('single');
+    strips.replaceChildren(...names.map((n) => {
+      const s = el('div', 'strip pending');
+      s.append(el('div', 'nm', title(n)), el('div', 'line'));
+      return s;
+    }));
+  }
+
+  /* ---------- stem waveforms: a band under each pad's name row, lit up to the playhead ---------- */
   let waves = { of: null, names: [], peaks: [] };
   function setPeaks(v) { waves = { of: waves.of, names: v.names, peaks: v.peaks }; drawWaves(); }
   function drawWaves() {
@@ -276,11 +323,11 @@
       if (i < 0) return;
       const wave = el('div', 'wave'), lit = el('div', 'wave-lit');
       const base = document.createElement('canvas'), top = document.createElement('canvas');
-      lit.append(top); wave.append(base, lit); s.prepend(wave);
+      lit.append(top); wave.append(base, lit); s.append(wave);
       const r = wave.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
       if (!r.width) { wave.remove(); return; }
       const bars = waves.peaks[i], step = r.width / bars.length, mid = r.height / 2;
-      for (const [cv, color] of [[base, 'rgba(255, 255, 255, 0.14)'], [top, 'rgba(159, 231, 245, 0.6)']]) {
+      for (const [cv, color] of [[base, 'rgba(237, 237, 234, 0.26)'], [top, '#ededea']]) {
         cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
         cv.style.width = r.width + 'px'; cv.style.height = r.height + 'px';
         const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr); ctx.fillStyle = color;
@@ -309,14 +356,52 @@
   // Drag files out: the page can't start an OS file drag, so once the pointer has moved a few
   // pixels with the button down, Python starts a native one from the window.
   function dragOut(node, paths) {
-    let start = null, sent = false;
-    node.addEventListener('pointerdown', (e) => { if (e.button === 0) { start = [e.clientX, e.clientY]; sent = false; } });
+    let start = null, sent = false, grab = [0, 0];
+    node.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const r = node.getBoundingClientRect();
+      start = [e.clientX, e.clientY]; grab = [e.clientX - r.left, e.clientY - r.top]; sent = false;
+    });
     node.addEventListener('pointermove', (e) => {
       if (!start || sent || !(e.buttons & 1)) return;
-      if (Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 5) { sent = true; start = null; call('drag_out', paths()); }
+      if (Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 5) {
+        sent = true; start = null;
+        lift(node, grab, e.clientX, e.clientY);
+        Promise.resolve(call('drag_out', paths())).finally(land);  // resolves when the drag is dropped
+      }
     });
     const end = () => { start = null; };
     node.addEventListener('pointerup', end); node.addEventListener('pointercancel', end);
+  }
+
+  // While something is dragged out, a copy of it follows the pointer over the window (the native drag only
+  // shows a cursor) and the original stays behind, faded. The page keeps getting dragover events meanwhile.
+  let ghost = null, grabAt = [0, 0];
+  function lift(node, grab, x, y) {
+    land();
+    const r = node.getBoundingClientRect(), src = node.querySelectorAll('canvas');
+    ghost = node.cloneNode(true);
+    ghost.classList.add('drag-ghost');  // not 'ghost': that's the text-button style
+    ghost.style.width = r.width + 'px'; ghost.style.height = r.height + 'px';
+    ghost.querySelectorAll('canvas').forEach((cv, i) => {  // cloned canvases come out blank
+      try { cv.getContext('2d').drawImage(src[i], 0, 0); } catch (e) { /* an empty canvas has nothing to copy */ }
+    });
+    ghost.from = node; grabAt = grab;
+    node.classList.add('lifted');
+    document.body.append(ghost);
+    S.draggingOut = true;
+    moveGhost(x, y);
+  }
+  function moveGhost(x, y) {
+    if (!ghost) return;
+    ghost.classList.remove('away');
+    ghost.style.transform = `translate3d(${x - grabAt[0]}px, ${y - grabAt[1]}px, 0) rotate(-2deg) scale(1.03)`;
+  }
+  function land() {
+    S.draggingOut = false;
+    if (!ghost) return;
+    ghost.from.classList.remove('lifted');
+    ghost.remove(); ghost = null;
   }
 
   /* ---------- 60fps loop: progress easing, player clock, aura ---------- */
@@ -383,10 +468,9 @@
     $('out-open').addEventListener('click', () => call('open_output'));
     $('drop').addEventListener('click', () => call('pick_files'));
     $('clear').addEventListener('click', () => call('clear_files'));
-    const yt = (save) => call('add_youtube', $('yt').value, save);
-    $('yt-add').addEventListener('click', () => yt(false));
-    $('yt-dl').addEventListener('click', () => yt(true));
-    $('yt').addEventListener('keydown', (e) => { if (e.key === 'Enter') yt(false); });
+    const yt = () => call('add_youtube', $('yt').value);
+    $('yt-add').addEventListener('click', yt);
+    $('yt').addEventListener('keydown', (e) => { if (e.key === 'Enter') yt(); });
     $('go').addEventListener('click', () => call('start'));
     $('stop').addEventListener('click', () => call('stop'));
     $('log-btn').addEventListener('click', () => showLog(!$('log').classList.contains('open')));
@@ -400,11 +484,23 @@
     // whole-window drop highlight; Python reads the real paths from the same drop event
     const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
     const armDrag = () => { clearTimeout(dragTimer); dragTimer = setTimeout(endDrag, 300); };
-    window.addEventListener('dragenter', (e) => { if (hasFiles(e)) { dragDepth++; document.body.classList.add('dragging'); armDrag(); } e.preventDefault(); });
-    window.addEventListener('dragleave', (e) => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth || !e.relatedTarget) endDrag(); });
-    window.addEventListener('dragover', (e) => { e.preventDefault(); if (document.body.classList.contains('dragging')) armDrag(); });
-    window.addEventListener('drop', (e) => { e.preventDefault(); endDrag(); }, true);
+    // a stem dragged out of the app passes over it too: move its copy, but don't offer "Drop to add"
+    window.addEventListener('dragenter', (e) => { e.preventDefault(); if (S.draggingOut) return moveGhost(e.clientX, e.clientY);
+      if (hasFiles(e)) { dragDepth++; document.body.classList.add('dragging'); armDrag(); } });
+    window.addEventListener('dragleave', (e) => { if (S.draggingOut) { if (!e.relatedTarget && ghost) ghost.classList.add('away'); return; }
+      dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth || !e.relatedTarget) endDrag(); });
+    window.addEventListener('dragover', (e) => { e.preventDefault(); if (S.draggingOut) return moveGhost(e.clientX, e.clientY);
+      if (document.body.classList.contains('dragging')) armDrag(); });
+    window.addEventListener('drop', (e) => { e.preventDefault(); endDrag(); if (S.draggingOut) land(); }, true);
     window.addEventListener('dragend', endDrag);
+
+    // Space plays or pauses the stems; 1-9 solo a stem. Typing in a field is left alone.
+    document.addEventListener('keydown', (e) => {
+      if (e.ctrlKey || e.altKey || e.metaKey || e.repeat || e.target.closest('input, textarea')) return;
+      if (e.code === 'Space' && S.player.ready) { e.preventDefault(); call('toggle_play'); return; }
+      const strip = /^[1-9]$/.test(e.key) && document.querySelectorAll('.strip.drag')[+e.key - 1];
+      if (strip && strip.querySelector('.solo')) call('toggle_strip', 'solo', strip.dataset.name);
+    });
     window.addEventListener('blur', endDrag);
     window.addEventListener('resize', () => { renderSettings(); drawWaves(); });
   }
