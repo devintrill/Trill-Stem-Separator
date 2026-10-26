@@ -2439,6 +2439,51 @@ def dark_title_bar(window):
         pass
 
 
+def fit_on_screen(window):
+    """The window keeps the size it opens at, like UVR's. On a screen with less room than that (a laptop at
+    150% scaling has about 1280x680 to spare) it shrinks to fit, so Separate never ends up under the taskbar."""
+    if os.name != "nt":
+        return
+    try:
+        from System import Action
+        from System.Windows.Forms import Screen
+        form = window.native
+
+        def fit():
+            area = Screen.FromControl(form).WorkingArea
+            w, h = min(form.Width, area.Width), min(form.Height, area.Height)
+            if (w, h) != (form.Width, form.Height):
+                form.SetBounds(area.X + (area.Width - w) // 2, area.Y + (area.Height - h) // 2, w, h)
+
+        form.Invoke(Action(fit))
+    except Exception:
+        pass
+
+
+def redraw_after_restore(window):
+    """WebView2 comes back blank when the window is restored from minimized, until something resizes it.
+    Nudging the browser control a pixel and back makes it draw again."""
+    if os.name != "nt":
+        return
+
+    def nudge():
+        try:
+            from System import Action
+            form = window.native
+            view = form.webview
+
+            def resize():
+                w = view.Width
+                view.Width = w - 1
+                view.Width = w
+
+            form.BeginInvoke(Action(resize))
+        except Exception:
+            pass
+
+    threading.Timer(0.15, nudge).start()  # once the restore has settled
+
+
 def main():
     if not (UI_DIR / "index.html").exists():
         fatal(f"The ui folder is missing. It must sit next to {Path(__file__).name}.")
@@ -2451,8 +2496,9 @@ def main():
     bridge = Bridge()
     engine = Engine(bridge.emit)
     api = Api(engine, bridge)
+    # one fixed size, like UVR: no resizing or maximizing (fit_on_screen shrinks it only on small screens)
     window = webview.create_window(APP_NAME, html=build_page(), js_api=api, width=1080, height=820,
-                                   min_size=(900, 700), background_color="#0d0d12", text_select=False)
+                                   resizable=False, background_color="#0d0d12", text_select=False)
     bridge.window = window
 
     def on_drop(e, *_):
@@ -2479,8 +2525,9 @@ def main():
         engine.shutdown()
 
     window.events.loaded += on_loaded
-    window.events.shown += lambda *_: (set_icon(window), dark_title_bar(window))
+    window.events.shown += lambda *_: (set_icon(window), dark_title_bar(window), fit_on_screen(window))
     window.events.closing += on_closing
+    window.events.restored += lambda *_: redraw_after_restore(window)
     webview.start(gui="edgechromium" if os.name == "nt" else None, debug=False)
 
 

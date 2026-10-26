@@ -106,8 +106,10 @@
     $('count').textContent = files.length ? `${files.length} file${files.length === 1 ? '' : 's'}` : '';
     const keep = new Set(files.map((f) => f.path));
     for (const [p, r] of rows) if (!keep.has(p)) { r.remove(); rows.delete(p); }
-    list.querySelector('.empty')?.remove();
-    if (!files.length) { list.append(el('div', 'empty', 'No samples yet')); return; }
+    // empty: the drop zone says it all, there's nothing to clear and nothing to separate
+    S.hasFiles = files.length > 0;
+    $('clear').style.visibility = S.hasFiles ? '' : 'hidden';
+    renderGo();
     files.forEach((f, i) => {
       let r = rows.get(f.path);
       if (!r) {
@@ -204,12 +206,19 @@
     if (run.started) S.started = run.started;
     document.body.classList.toggle('locked', S.running);
     $('bar').parentElement.classList.toggle('running', S.running);
-    const go = $('go');
-    go.disabled = S.running; go.textContent = S.running ? 'Working' : 'Separate'; go.classList.toggle('working', S.running);
+    renderGo();
     $('stop').disabled = !S.running;
     $('yt').disabled = S.yt.busy;
     tickElapsed();
     renderLogo(); renderPending();
+  }
+  // Separate: lit while there's something to split, pressed in while it works, an unlit key with no samples
+  function renderGo() {
+    const go = $('go'), idle = !S.running && !S.hasFiles;
+    go.disabled = S.running || idle;
+    go.textContent = S.running ? 'Working' : 'Separate';
+    go.classList.toggle('working', S.running);
+    go.classList.toggle('idle', idle);
   }
   function tickElapsed() {
     if (!S.started) return;
