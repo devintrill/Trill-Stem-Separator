@@ -168,7 +168,8 @@ $Models = Join-Path $Runtime 'models'
 $OldModels = 'C:\Music-Source-Separation-Training\models'
 if (-not (Test-Path $Models) -and (Test-Path $OldModels)) {
     Say '  Copying the models you already have...'
-    robocopy $OldModels $Models /E /NFL /NDL /NJH /NJS /NP | Out-Null
+    # weights only: /S skips folders left empty once the old install's code files are excluded
+    robocopy $OldModels $Models /S /XF *.py *.pyc /NFL /NDL /NJH /NJS /NP | Out-Null
 }
 Say '  OK'
 
