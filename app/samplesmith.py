@@ -226,6 +226,8 @@ def prepare(job, keep):
     config = load_config(args.model_type, args.config_path)
     if "model_type" in config.training:
         args.model_type = config.training.model_type
+    # stock configs batch up to 8 chunks, which overflows 8 GB cards into Windows' slow shared memory
+    config.inference.batch_size = min(config.inference.batch_size, int(os.environ.get("SAMPLESMITH_BATCH", "2")))
     model, new = get(args, keep)
     return args, config, model, new
 
