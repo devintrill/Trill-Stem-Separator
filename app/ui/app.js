@@ -400,47 +400,82 @@
         const pic = dragPicture(node, grab);
         lift(node, grab, e.clientX, e.clientY);
         // resolves when the drag is dropped
-        Promise.resolve(call('drag_out', paths(), pic.png, pic.gx, pic.gy, pic.radius)).finally(land);
+        Promise.resolve(call('drag_out', paths(), pic.png, pic.gx, pic.gy)).finally(land);
       }
     });
     const end = () => { start = null; };
     node.addEventListener('pointerup', end); node.addEventListener('pointercancel', end);
   }
 
-  // A picture of what's dragged (face, gold edge, name, waveform) at screen resolution. Python shows it in a
-  // small window that stays under the pointer outside the app too, where Windows would only show a cursor.
+  // A picture of what's dragged, drawn from the element itself: its raised face with a gold edge and a soft
+  // shadow (in a transparent margin), the lit grip, the name cut to fit, BPM/key badges, S/M and the waveform.
+  // Python puts it in a window that stays under the pointer, outside the app too.
   function dragPicture(node, grab) {
-    const r = node.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const r = node.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, m = 20;  // m: room for the shadow
     const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 12;
     const cv = document.createElement('canvas');
-    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
-    const c = cv.getContext('2d'); c.scale(dpr, dpr);
+    cv.width = Math.round((r.width + m * 2) * dpr); cv.height = Math.round((r.height + m * 2) * dpr);
+    const c = cv.getContext('2d'); c.scale(dpr, dpr); c.translate(m, m);
+    const box = (el) => { const b = el.getBoundingClientRect(); return [b.left - r.left, b.top - r.top, b.width, b.height]; };
+    const round = (x, y, w, h, rad) => { c.beginPath(); c.roundRect(x, y, w, h, rad); };
+    const write = (el, color, center) => {
+      const [x, y, w, h] = box(el), st = getComputedStyle(el);
+      let t = el.textContent.trim();
+      c.font = st.font; c.fillStyle = color || st.color; c.textBaseline = 'middle'; c.textAlign = center ? 'center' : 'left';
+      if (c.measureText(t).width > w) { while (t.length > 1 && c.measureText(t + '…').width > w) t = t.slice(0, -1); t += '…'; }
+      c.fillText(t, center ? x + w / 2 : x, y + h / 2);
+    };
+    const dots = (cx, cy, color) => {
+      c.fillStyle = color;
+      for (const dx of [-2.6, 2.6]) for (const dy of [-5, 0, 5]) { c.beginPath(); c.arc(cx + dx, cy + dy, 1.5, 0, Math.PI * 2); c.fill(); }
+    };
+
+    c.save();
+    c.shadowColor = 'rgba(0, 0, 0, 0.55)'; c.shadowBlur = 18; c.shadowOffsetY = 8;
     const face = c.createLinearGradient(0, 0, 0, r.height);
-    face.addColorStop(0, '#30303c'); face.addColorStop(1, '#262631');
-    c.fillStyle = face; c.fillRect(0, 0, r.width, r.height);
-    c.strokeStyle = '#f3c94a'; c.lineWidth = 3;
-    c.beginPath(); c.roundRect(1.5, 1.5, r.width - 3, r.height - 3, Math.max(0, radius - 1.5)); c.stroke();
-    const label = node.querySelector('.label, .name');
-    const lr = (label || node).getBoundingClientRect(), x = label ? lr.left - r.left : 14;
-    c.fillStyle = '#f4f4f0'; c.textBaseline = 'middle';
-    c.font = label ? getComputedStyle(label).font : getComputedStyle(node).font;
-    c.fillText((label || node).textContent.trim(), x, label ? lr.top - r.top + lr.height / 2 : r.height / 2, r.width - x - 10);
-    node.querySelectorAll('.wave > canvas').forEach((src) => {
-      const s = src.getBoundingClientRect();
-      try { c.drawImage(src, s.left - r.left, s.top - r.top, s.width, s.height); } catch (e) { /* nothing drawn yet */ }
+    face.addColorStop(0, '#363642'); face.addColorStop(1, '#2b2b36');
+    c.fillStyle = face; round(0, 0, r.width, r.height, radius); c.fill();
+    c.restore();
+    c.strokeStyle = '#f3c94a'; c.lineWidth = 1.5; round(0.75, 0.75, r.width - 1.5, r.height - 1.5, radius - 0.75); c.stroke();
+
+    node.querySelectorAll('.grip').forEach((g) => {
+      const [x, y, w, h] = box(g);
+      c.fillStyle = 'rgba(0, 0, 0, 0.22)'; round(x, y, w, h, 7); c.fill();
+      dots(x + w / 2, y + h / 2, '#f3c94a');  // lit: it's in your hand
     });
-    return { png: cv.toDataURL('image/png').split(',')[1], gx: Math.round(grab[0] * dpr), gy: Math.round(grab[1] * dpr),
-             radius: Math.round(radius * dpr) };
+    node.querySelectorAll('.badge, .sw').forEach((b) => {
+      const [x, y, w, h] = box(b), st = getComputedStyle(b), rad = parseFloat(st.borderTopLeftRadius) || 0;
+      const lit = b.classList.contains('on') && (b.classList.contains('solo') ? '#efc23a' : b.classList.contains('mute') ? '#e2716c' : '');
+      c.fillStyle = lit || st.backgroundColor; round(x, y, w, h, Math.min(rad, h / 2)); c.fill();
+      const ring = /(rgba?\([^)]*\)) 0px 0px 0px 1px inset/.exec(st.boxShadow);
+      if (ring && !lit) { c.strokeStyle = ring[1]; c.lineWidth = 1; round(x + 0.5, y + 0.5, w - 1, h - 1, Math.min(rad, h / 2)); c.stroke(); }
+      write(b, lit ? '#141209' : st.color, true);
+    });
+    node.querySelectorAll('.label, .name, .size').forEach((t) => write(t));
+    node.querySelectorAll('.wave > canvas').forEach((src) => {
+      const [x, y, w, h] = box(src);
+      try { c.drawImage(src, x, y, w, h); } catch (e) { /* nothing drawn yet */ }
+    });
+    if (node.classList.contains('chip')) {  // Drag all
+      dots(16, r.height / 2, '#f3c94a');
+      c.font = getComputedStyle(node).font; c.fillStyle = '#f4f4f0'; c.textBaseline = 'middle'; c.textAlign = 'left';
+      c.fillText(node.textContent.trim(), 28, r.height / 2);
+    }
+    return { png: cv.toDataURL('image/png').split(',')[1],
+             gx: Math.round((grab[0] + m) * dpr), gy: Math.round((grab[1] + m) * dpr) };
   }
 
-  // While something is dragged out, a copy of it follows the pointer over the window and the original stays
-  // behind as an empty well. Once Python's picture window takes over (drag_native) the page's copy hides.
+  // While something is dragged out, the original stays behind as an empty well. Python's picture window
+  // follows the pointer; the page's own copy below is only a fallback, shown if that window hasn't
+  // appeared (drag_native) shortly after the drag starts, so the two never show at once.
   let ghost = null, grabAt = [0, 0];
   function lift(node, grab, x, y) {
     land();
     const r = node.getBoundingClientRect(), src = node.querySelectorAll('canvas');
     ghost = node.cloneNode(true);
-    ghost.classList.add('drag-ghost');  // not 'ghost': that's the text-button style
+    ghost.classList.add('drag-ghost', 'waiting');  // not 'ghost': that's the text-button style
+    const mine = ghost;
+    setTimeout(() => { if (ghost === mine && !mine.classList.contains('native')) mine.classList.remove('waiting'); }, 250);
     ghost.style.width = r.width + 'px'; ghost.style.height = r.height + 'px';
     ghost.querySelectorAll('canvas').forEach((cv, i) => {  // cloned canvases come out blank
       try { cv.getContext('2d').drawImage(src[i], 0, 0); } catch (e) { /* an empty canvas has nothing to copy */ }

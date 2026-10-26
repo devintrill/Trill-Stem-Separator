@@ -2094,7 +2094,7 @@ class Api:
     def seek(self, frac):
         self._engine.seek(frac)
 
-    def drag_out(self, paths, picture=None, grab_x=0, grab_y=0, radius=0):
+    def drag_out(self, paths, picture=None, grab_x=0, grab_y=0):
         """Drag stem files out of the window (into a DAW, Explorer, ...).
 
         A web page can't start an operating-system file drag, so the page calls this while the mouse
@@ -2114,7 +2114,7 @@ class Api:
                 ghost = follow = None
                 if picture:
                     try:
-                        ghost = DragPicture(picture, int(grab_x), int(grab_y), int(radius))
+                        ghost = DragPicture(picture, int(grab_x), int(grab_y))
                         follow = ghost.follow  # one object, so it can be unhooked again
                         form.GiveFeedback += follow
                         self._bridge.emit("drag_native", True)  # the page hides its own copy
@@ -2142,56 +2142,89 @@ class Api:
 
 
 class DragPicture:
-    """A small borderless window showing the dragged pad, kept under the pointer while a file drag
-    runs. It is click-through and never takes focus, so the drop still lands on whatever is below it."""
+    """The dragged pad in a borderless window kept under the pointer while a file drag runs.
 
-    def __init__(self, png_b64, grab_x, grab_y, radius):
+    The page draws the picture with its own transparency (rounded corners, soft shadow) and the window
+    takes those pixels as they are (UpdateLayeredWindow), so there's no unpainted frame or jagged edge.
+    It's click-through and never focused, so the drop still lands on whatever is below it. It follows
+    the pointer on a fast timer as well as on the drag's feedback events."""
+
+    def __init__(self, png_b64, grab_x, grab_y):
         import ctypes
+        import ctypes.wintypes as wt
         import clr
         clr.AddReference("System.Drawing")
         clr.AddReference("System.Windows.Forms")
         from System import Convert
-        from System.Drawing import Bitmap, Region
-        from System.Drawing.Drawing2D import GraphicsPath
+        from System.Drawing import Bitmap, Color
         from System.IO import MemoryStream
-        from System.Windows.Forms import Form, FormBorderStyle, FormStartPosition
+        from System.Windows.Forms import Form, FormBorderStyle, FormStartPosition, Timer
+
+        class Blend(ctypes.Structure):
+            _fields_ = [("op", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("alpha", ctypes.c_ubyte), ("format", ctypes.c_ubyte)]
 
         self.u = u = ctypes.windll.user32
+        gdi = ctypes.windll.gdi32
         u.SetWindowPos.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int, ctypes.c_int,
                                    ctypes.c_int, ctypes.c_int, ctypes.c_uint)
         u.GetWindowLongW.argtypes = (ctypes.c_void_p, ctypes.c_int)
         u.SetWindowLongW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_long)
-        u.SetLayeredWindowAttributes.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_ubyte, ctypes.c_uint)
-        self.grab = (grab_x, grab_y)
-        self.bmp = Bitmap(MemoryStream(Convert.FromBase64String(png_b64)))
+        u.GetDC.restype = gdi.CreateCompatibleDC.restype = gdi.SelectObject.restype = ctypes.c_void_p
+        u.GetDC.argtypes = (ctypes.c_void_p,)
+        u.ReleaseDC.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        gdi.CreateCompatibleDC.argtypes = (ctypes.c_void_p,)
+        gdi.SelectObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        gdi.DeleteObject.argtypes = gdi.DeleteDC.argtypes = (ctypes.c_void_p,)
+        u.UpdateLayeredWindow.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wt.POINT), ctypes.POINTER(wt.SIZE),
+                                          ctypes.c_void_p, ctypes.POINTER(wt.POINT), ctypes.c_uint,
+                                          ctypes.POINTER(Blend), ctypes.c_uint)
+        self.grab, self.at = (grab_x, grab_y), None
+
+        bmp = Bitmap(MemoryStream(Convert.FromBase64String(png_b64)))
         w = self.win = Form()
         w.FormBorderStyle = getattr(FormBorderStyle, "None")  # "None" is a Python keyword
         w.ShowInTaskbar = False
         w.StartPosition = FormStartPosition.Manual
-        w.ClientSize = self.bmp.Size
-        w.BackgroundImage = self.bmp
-        width, height, d = self.bmp.Width, self.bmp.Height, max(2, radius * 2)
-        path = GraphicsPath()  # rounded corners, like the pad
-        path.AddArc(0, 0, d, d, 180, 90)
-        path.AddArc(width - d, 0, d, d, 270, 90)
-        path.AddArc(width - d, height - d, d, d, 0, 90)
-        path.AddArc(0, height - d, d, d, 90, 90)
-        path.CloseFigure()
-        w.Region = Region(path)
         self.hwnd = ctypes.c_void_p(w.Handle.ToInt64())
-        # layered (for the slight see-through), click-through, never activated, no taskbar button, on top
+        # layered, click-through, never activated, no taskbar button, on top
         style = u.GetWindowLongW(self.hwnd, -20)
         u.SetWindowLongW(self.hwnd, -20, style | 0x80000 | 0x20 | 0x08000000 | 0x80 | 0x8)
-        u.SetLayeredWindowAttributes(self.hwnd, 0, 235, 2)
-        self.move(0x40)  # SWP_SHOWWINDOW
 
-    def move(self, extra=0):
+        # hand the picture's pixels, alpha and all, straight to the window
+        screen = u.GetDC(None)
+        mem = gdi.CreateCompatibleDC(screen)
+        hbmp = ctypes.c_void_p(bmp.GetHbitmap(Color.FromArgb(0)).ToInt64())
+        old = gdi.SelectObject(mem, hbmp)
+        pos = self.cursor()
+        u.UpdateLayeredWindow(self.hwnd, screen, ctypes.byref(pos), ctypes.byref(wt.SIZE(bmp.Width, bmp.Height)), mem,
+                              ctypes.byref(wt.POINT(0, 0)), 0, ctypes.byref(Blend(0, 0, 255, 1)), 2)  # AC_SRC_ALPHA, ULW_ALPHA
+        gdi.SelectObject(mem, old)
+        gdi.DeleteObject(hbmp)
+        gdi.DeleteDC(mem)
+        u.ReleaseDC(None, screen)
+        bmp.Dispose()
+        u.ShowWindow(self.hwnd, 4)  # SW_SHOWNOACTIVATE
+        self.move()
+
+        self.timer = Timer()
+        self.timer.Interval = 10
+        self.tick = lambda *_: self.move()  # one object, so it can be unhooked again
+        self.timer.Tick += self.tick
+        self.timer.Start()
+
+    def cursor(self):
         import ctypes
-        import ctypes.wintypes
-        pt = ctypes.wintypes.POINT()
+        import ctypes.wintypes as wt
+        pt = wt.POINT()
         self.u.GetCursorPos(ctypes.byref(pt))
-        # HWND_TOPMOST; SWP_NOSIZE | SWP_NOACTIVATE
-        self.u.SetWindowPos(self.hwnd, -1, pt.x - self.grab[0], pt.y - self.grab[1], 0, 0, 0x1 | 0x10 | extra)
+        return wt.POINT(pt.x - self.grab[0], pt.y - self.grab[1])
+
+    def move(self):
+        pos = self.cursor()
+        if self.at != (pos.x, pos.y):
+            self.at = (pos.x, pos.y)
+            # HWND_TOPMOST; SWP_NOSIZE | SWP_NOACTIVATE
+            self.u.SetWindowPos(self.hwnd, -1, pos.x, pos.y, 0, 0, 0x1 | 0x10)
 
     def follow(self, sender, e):
         e.UseDefaultCursors = True
@@ -2199,9 +2232,11 @@ class DragPicture:
 
     def close(self):
         try:
+            self.timer.Stop()
+            self.timer.Tick -= self.tick
+            self.timer.Dispose()
             self.win.Close()
             self.win.Dispose()
-            self.bmp.Dispose()
         except Exception:
             pass
 
