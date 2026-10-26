@@ -189,6 +189,22 @@ from utils.settings import get_model_from_config, load_config, parse_args_infere
 from utils.model_utils import demix, load_start_checkpoint
 
 torch.backends.cudnn.benchmark = True
+
+
+def watch_parent():
+    # quit with the app even if it's killed, so a stale engine never keeps holding GPU memory
+    pid = int(os.environ.get("SAMPLESMITH_PARENT", "0"))
+    if os.name != "nt" or not pid:
+        return
+    import ctypes, threading
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not h:
+        os._exit(0)
+    threading.Thread(target=lambda: (k.WaitForSingleObject(h, 0xFFFFFFFF), os._exit(0)), daemon=True).start()
+
+
+watch_parent()
 cuda = torch.cuda.is_available()
 device = "cuda:0" if cuda else "cpu"
 print("@@gpu " + (torch.cuda.get_device_name(0) if cuda else "CPU"), flush=True)
@@ -1020,7 +1036,8 @@ class Warm:
                 script = CACHE_DIR / "msst_server.py"
                 script.parent.mkdir(parents=True, exist_ok=True)
                 script.write_text(SERVER, encoding="utf-8")
-                env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+                env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
+                           SAMPLESMITH_PARENT=str(os.getpid()))
                 self.proc = subprocess.Popen([console_python(), "-u", str(script)], cwd=MSST_DIR,
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, env=env, creationflags=no_window())
@@ -2153,5 +2170,18 @@ def main():
     webview.start(gui="edgechromium" if os.name == "nt" else None, debug=False)
 
 
+def hide_console():
+    # the venv launcher can start the app under python.exe, which opens a cmd window; hide it
+    if os.name == "nt":
+        try:
+            import ctypes
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
+    hide_console()
     main()
