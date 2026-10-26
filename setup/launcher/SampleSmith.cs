@@ -95,7 +95,7 @@ class SetupWindow : Form
 {
     static readonly string[] Steps = {
         "Checking your graphics card", "Checking Windows components", "Getting the installer tools",
-        "Setting up Python 3.11", "Installing PyTorch (about 2.5 GB)", "Installing the app packages",
+        "Setting up Python 3.11", "Installing PyTorch", "Installing the app packages",
         "Getting the separation engine", "Setting up key detection", "Finishing up" };
     static readonly int[] Loop = { 0, 1, 3, 2 };  // the lit pad goes round clockwise
 
@@ -114,6 +114,7 @@ class SetupWindow : Form
     int step, frame;
     bool failed, done, stopping;
     string failMsg, lastText;
+    string size = "2 to 4 GB";  // until install.ps1 has found the graphics card
 
     public SetupWindow(string dir, string script)
     {
@@ -246,6 +247,12 @@ class SetupWindow : Form
         }
         string t = line.Trim();
         if (t.Length == 0) return;
+        if (t.StartsWith("@@size "))
+        {
+            size = t.Substring(7);
+            Invalidate();
+            return;
+        }
         if (t.StartsWith("Check your internet connection")) failMsg = lastText;  // the line before it says what failed
         else if (t == "SampleSmith is ready.") done = true;
         else if (step > 0 && line.StartsWith("  ") && t != "OK") notes[step - 1] = t;
@@ -399,7 +406,7 @@ class SetupWindow : Form
 
         // what's happening
         string title = failed ? "Setup stopped" : done ? "SampleSmith is ready" : "Setting things up";
-        string sub = failed ? failMsg : "This happens once. It downloads about 4 GB.";
+        string sub = failed ? failMsg : "This happens once. It downloads " + size + ".";
         using (var f = new Font(word, 20 * s, wordStyle, GraphicsUnit.Pixel))
             Write(g, title, f, C(0xf4f4f0), R(48, 108, 464, 30), StringAlignment.Near);
         using (var f = new Font("Segoe UI", 13 * s, GraphicsUnit.Pixel))

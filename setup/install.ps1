@@ -85,22 +85,40 @@ function PyOk($code) {
 Say '======================================' White
 Say '  SampleSmith setup' White
 Say '======================================' White
-Say 'This downloads about 4 GB the first time, so it can take a while.'
+Say 'This downloads 2 to 4 GB the first time (depending on your graphics card), so it can take a while.'
 
-# 1. Graphics card: pick the PyTorch build that supports it.
+# 1. Graphics card: pick the PyTorch build that runs on it. NVIDIA cards get CUDA; AMD Radeon and Intel Arc
+#    cards get DirectML (DirectX 12); anything else runs on the processor.
 Step 1 'Checking your graphics card'
+$Gpu = 'cpu'
 $TorchIndex = 'https://download.pytorch.org/whl/cu126'
 $smi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
 if (-not $smi -and (Test-Path "$env:SystemRoot\System32\nvidia-smi.exe")) { $smi = "$env:SystemRoot\System32\nvidia-smi.exe" }
+$nv = ''   # (PowerShell names aren't case-sensitive, so not $gpu)
 if ($smi) {
-    $gpu = (& $smi --query-gpu=name,compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
-    Say "  $gpu"
-    $cap = 0.0
-    if ($gpu -match ',\s*([\d.]+)') { $cap = [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture) }
+    $nv = (& $smi --query-gpu=name,compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
+}
+if ($nv -match '^([^,]+),\s*([\d.]+)') {
+    $Gpu = 'nvidia'
+    Say "  $($Matches[1] -replace '^NVIDIA (GeForce )?', '')"
+    $cap = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
     if ($cap -ge 12) { $TorchIndex = 'https://download.pytorch.org/whl/cu128' }   # RTX 50 series
 } else {
-    Say '  No NVIDIA graphics card found. SampleSmith needs one; without it splitting is very slow.' Yellow
+    # Older built-in graphics (Intel UHD/Iris, early Radeon Vega) are slower than the processor, so only
+    # Radeon RX/Pro cards, recent Radeon laptop chips and Intel Arc count.
+    $cards = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name -replace '\((R|TM)\)', '' })
+    $card = $cards | Where-Object { $_ -cmatch 'Radeon.*\b(RX|Pro|VII|\d{3}M|\d{4}S)\b|\bArc\b' } | Select-Object -First 1
+    if ($card) {
+        $Gpu = 'directml'
+        $card = ($card -replace '\s+Graphics$', '').Trim()
+        $short = $card -replace '^(AMD|Intel)\s+', ''
+        Say "  $(if ($short -match ' ') { $short } else { $card })"   # 'Arc A770', but 'Intel Arc'
+    } else {
+        Say '  None found, so splitting uses the processor' Yellow
+    }
 }
+# the setup window shows this; CUDA PyTorch alone is about 2.5 GB
+Write-Host "@@size $(if ($Gpu -eq 'nvidia') { 'about 4 GB' } else { 'about 2 GB' })"
 
 # 2. Windows parts the app needs: WebView2 (the window) and the Visual C++ runtime (PyTorch).
 Step 2 'Checking Windows components'
@@ -139,10 +157,23 @@ if (-not (PyOk 'import sys; assert sys.version_info[:2] == (3, 11)')) {
 }
 Say '  OK'
 
-# 5. PyTorch with CUDA (the big download).
-Step 5 'Installing PyTorch (about 2.5 GB)'
-if (-not (PyOk 'import torch, sys; sys.exit(0 if torch.version.cuda else 1)')) {
-    Run { & $Uv pip install --python $Py torch torchaudio --index-url $TorchIndex }
+# 5. PyTorch for that card (the big download). --reinstall-package swaps a build left from a different card.
+Step 5 'Installing PyTorch'
+if ($Gpu -eq 'nvidia') {
+    if (-not (PyOk 'import torch, sys; sys.exit(0 if torch.version.cuda else 1)')) {
+        Say '  About 2.5 GB'
+        & $Uv pip uninstall --python $Py torch-directml 2>$null | Out-Null
+        Run { & $Uv pip install --python $Py torch torchaudio --index-url $TorchIndex --reinstall-package torch --reinstall-package torchaudio }
+    }
+} elseif ($Gpu -eq 'directml') {
+    # torch-directml pins its PyTorch (2.4.1); torchaudio has to match it
+    if (-not (PyOk 'import torch_directml')) {
+        Say '  About 300 MB'   # PyTorch for the processor, DirectML and torchvision
+        Run { & $Uv pip install --python $Py torch-directml torchaudio==2.4.1 --reinstall-package torch --reinstall-package torchaudio }
+    }
+} elseif (-not (PyOk 'import torch')) {
+    Say '  About 300 MB'
+    Run { & $Uv pip install --python $Py torch torchaudio --index-url 'https://download.pytorch.org/whl/cpu' }
 }
 Say '  OK'
 

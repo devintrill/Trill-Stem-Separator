@@ -6,12 +6,13 @@ A dark-mode Windows desktop app for splitting songs and samples into stems (voca
 
 ## Overview
 
-SampleSmith is a front end for [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (MSST) by ZFTurbo. MSST does the heavy lifting on your GPU; this app gives it a simple window: drop files in, pick a model and a quality level, press go.
+SampleSmith is a front end for [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (MSST) by ZFTurbo. MSST does the heavy lifting on your graphics card; this app gives it a simple window: drop files in, pick a model and a quality level, press go.
 
 - The window is HTML/CSS/JS (`ui/`) displayed with **pywebview** using Microsoft Edge **WebView2**.
 - All processing runs in `app/samplesmith.py`, in a private Python 3.11 environment that setup creates in `runtime/`.
 - Separation models are downloaded automatically the first time you use them.
-- Tested on an **NVIDIA RTX 4060 (8 GB)**.
+- Runs on NVIDIA cards through CUDA, on AMD Radeon and Intel Arc cards through DirectML, and on the processor when there's no suitable card. Setup detects which and downloads only that.
+- Tested on an **NVIDIA RTX 4060 (8 GB)**, with both CUDA and DirectML.
 
 ---
 
@@ -34,8 +35,11 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 ## Requirements
 
 - Windows 10 or 11 (64-bit)
-- An NVIDIA graphics card (RTX 20 series or newer, 6 GB+ VRAM recommended) with a current driver
-- About 8 GB of free disk space and an internet connection for setup
+- A graphics card with a current driver is strongly recommended (8 GB+ VRAM):
+  - **NVIDIA** (GTX 10 series or newer): fastest, through CUDA.
+  - **AMD Radeon RX / Pro, recent Radeon laptop chips (780M and up), Intel Arc**: through DirectML. Works, but about 5x slower than CUDA on a similar card.
+  - **No suitable card**: splitting runs on the processor. It works, but a song takes several minutes, so SampleSmith starts on Fast quality.
+- About 8 GB of free disk space with an NVIDIA card (about 4 GB otherwise) and an internet connection for setup
 
 ---
 
@@ -43,7 +47,7 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 
 1. Download SampleSmith and unzip it anywhere (for example your Desktop or Documents).
 2. Double-click **SampleSmith.exe**. If Windows SmartScreen appears, choose *More info* > *Run anyway*.
-3. The first time, a setup window installs everything SampleSmith needs into the `runtime` folder next to it: Python 3.11, PyTorch with CUDA, the MSST separation engine, Node.js and the detection models. It downloads about 4 GB, then opens the app and adds Desktop and Start menu shortcuts.
+3. The first time, a setup window installs everything SampleSmith needs into the `runtime` folder next to it: Python 3.11, the PyTorch build for your graphics card (CUDA for NVIDIA, DirectML for AMD and Intel, processor-only otherwise), the MSST separation engine, Node.js and the detection models. It downloads about 4 GB with an NVIDIA card and about 2 GB otherwise, then opens the app and adds Desktop and Start menu shortcuts.
 
 After that, SampleSmith.exe opens the app directly. If anything goes missing, it runs setup again to repair it.
 
@@ -127,7 +131,7 @@ The key is shown with its relative major or minor, for example `A min / C maj`, 
 Check your internet connection and open SampleSmith.exe again; setup continues where it stopped. The full output is in `%APPDATA%\SampleSmith\install.log`.
 
 **Splitting is very slow / "No GPU"**
-SampleSmith needs an NVIDIA graphics card with a current driver. Update the driver from nvidia.com and restart the app.
+SampleSmith didn't find a card it can use, so it's splitting on the processor. Update your graphics driver (nvidia.com, amd.com or intel.com) and restart the app. If you added or changed the card since setup, delete `runtime\venv` and open SampleSmith.exe to set it up again for the new card. If a DirectML card can't run a model, SampleSmith switches to the processor on its own and says so in the log.
 
 **The window is blank**
 Install or repair the Microsoft Edge WebView2 Runtime.
@@ -153,7 +157,7 @@ SampleSmith\
   setup\
     install.ps1        One-click setup
     requirements.txt   Python packages
-    launcher\          Source of SampleSmith.exe (Go)
+    launcher\          Source of SampleSmith.exe (C#)
   runtime\             Created by setup: Python, packages, engine, models, Node
 
 %APPDATA%\SampleSmith\  settings.json, samplesmith.log, install.log
@@ -174,6 +178,6 @@ This app is a front end; the real work is done by these projects:
 - **[S-KEY](https://github.com/deezer/skey)** by Deezer Research: key detection fallback.
 - **[librosa](https://librosa.org/)**: audio analysis and final fallback.
 - **[pywebview](https://pywebview.flowrl.com/)**: the desktop window.
-- Also: yt-dlp, FFmpeg (imageio-ffmpeg), sounddevice, soundfile, PyTorch, uv, Node.js, and the Inter and Instrument Sans typefaces.
+- Also: yt-dlp, FFmpeg (imageio-ffmpeg), sounddevice, soundfile, PyTorch, torch-directml, uv, Node.js, and the Inter and Instrument Sans typefaces.
 
 Please respect the licenses of each project and model.

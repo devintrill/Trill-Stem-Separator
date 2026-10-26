@@ -132,16 +132,145 @@ QUALITY_HINT = {
     "Best": "High + test-time augmentation. About 6x slower than Fast.",
 }
 
+# Picks where an MSST process runs. NVIDIA cards use CUDA; AMD Radeon and Intel Arc cards use DirectML
+# (DirectX 12); anything else uses the processor. SAMPLESMITH_DEVICE=cuda/dml/cpu forces one (DirectML also
+# runs on NVIDIA cards, which is how the AMD/Intel path gets tested without one).
+DEVICE = """
+want = os.environ.get("SAMPLESMITH_DEVICE", "")
+cuda = dml = False
+device, name = "cpu", "CPU"
+if want in ("", "cuda") and torch.cuda.is_available():
+    cuda, device, name = True, "cuda:0", torch.cuda.get_device_name(0)
+elif want in ("", "dml"):
+    try:
+        import torch_directml
+        # (names come back with a trailing NUL)
+        names = [torch_directml.device_name(i).replace(chr(0), "").strip() for i in range(torch_directml.device_count())]
+        # laptops list their built-in graphics too: take the dedicated card when there is one
+        pick = next((i for i, s in enumerate(names) if {"NVIDIA", "RX", "Pro", "Arc"} & set(s.replace("(", " ").split())),
+                    torch_directml.default_device())
+        dml, device, name = True, torch_directml.device(pick), names[pick]
+    except Exception:
+        pass
+if dml:
+    # DirectML has no complex numbers, and both models make their spectrograms with them. Those steps (and
+    # the complex views around them) run on the CPU; everything else, the heavy part, stays on the GPU.
+    _stft, _istft, _real, _complex = torch.stft, torch.istft, torch.view_as_real, torch.view_as_complex
+
+    def _cpu(t):
+        return t.cpu() if isinstance(t, torch.Tensor) else t
+
+    def _stft_cpu(x, *a, **k):
+        k["window"] = _cpu(k.get("window"))
+        return _stft(_cpu(x), *a, **k)
+
+    def _istft_cpu(z, *a, **k):
+        k["window"] = _cpu(k.get("window"))
+        return _istft(_cpu(z), *a, **k).to(device)
+
+    def _real_on_gpu(z):
+        return _real(z).to(device) if z.is_complex() and z.device.type == "cpu" else _real(z)
+
+    def _complex_on_cpu(t):
+        return _complex(_cpu(t).contiguous())
+
+    torch.stft, torch.istft, torch.view_as_real, torch.view_as_complex = _stft_cpu, _istft_cpu, _real_on_gpu, _complex_on_cpu
+    # DirectML can't run under inference mode ("Cannot set version_counter"); no_grad does the same job here
+    _infer = torch.inference_mode
+    torch.inference_mode = lambda mode=True: torch.no_grad() if mode else torch.enable_grad()
+    # and rejects empty pieces in a cat ("The parameter is incorrect"), which rotary embeddings pass it
+    _cat = torch.cat
+
+    def _cat_nonempty(ts, *a, **k):
+        ts = list(ts)
+        return _cat([t for t in ts if t.numel()] or ts, *a, **k)
+
+    torch.cat = _cat_nonempty
+    # and has no memory-efficient attention: it builds the whole attention matrix (2.6 GB at once for
+    # BS-RoFormer), so work through the batch in slices of about 256 MB instead. Same result, lower peak.
+    # DirectML only reuses freed memory once the queued work has run, so each slice waits for the last.
+    F = torch.nn.functional
+    _sdpa = F.scaled_dot_product_attention
+
+    def _sdpa_sliced(q, k, v, *a, **kw):
+        step = max(1, (256 << 20) // (q[0].numel() // q.shape[-1] * k.shape[-2] * 4))
+        if q.shape[0] <= step or a or kw.get("attn_mask") is not None:
+            return _sdpa(q, k, v, *a, **kw)
+        k[-1, -1, -1, -1].item()  # let the work queued so far (and its scratch memory) clear first
+        outs = []
+        for i in range(0, q.shape[0], step):
+            outs.append(_sdpa(q[i:i + step], k[i:i + step], v[i:i + step], **kw))
+            outs[-1][-1, -1, -1, -1].item()  # wait for it
+        return _cat(outs)
+
+    F.scaled_dot_product_attention = _sdpa_sliced
+    # and pads with nothing ("pad by 0", every full-length chunk in demix) by returning zeros
+    _pad = F.pad
+
+    def _pad_nonzero(x, pad, *a, **kw):
+        return x.clone() if not any(pad) else _pad(x, pad, *a, **kw)
+
+    F.pad = _pad_nonzero
+print("@@gpu " + name, flush=True)
+print("Using device: ", "privateuseone (DirectML)" if dml else device, flush=True)
+
+
+def fit(config, model_type):
+    # stock configs batch up to 8 chunks, which overflows 8 GB cards into Windows' slow shared memory
+    config.inference.batch_size = min(config.inference.batch_size, int(os.environ.get("SAMPLESMITH_BATCH", "2")))
+    if dml:
+        # without memory-efficient attention a 13 s BS-RoFormer chunk doesn't fit in 8 GB; one 8 s chunk at a
+        # time (the length BS-RoFormer was first released with) does. HTDemucs' segment is fixed by its training.
+        config.inference.batch_size = 1
+        if model_type != "htdemucs":
+            part = config.inference if "chunk_size" in config.inference else config.audio
+            part.chunk_size = min(part.chunk_size, 352800)
+
+
+def use_cpu():
+    # this card's DirectML couldn't run the model: carry on with the processor, slower but it works
+    global dml, device
+    dml, device = False, "cpu"
+    torch.stft, torch.istft, torch.view_as_real, torch.view_as_complex = _stft, _istft, _real, _complex
+    torch.inference_mode, torch.cat, F.scaled_dot_product_attention, F.pad = _infer, _cat, _sdpa, _pad
+    print("WARNING: DirectML couldn't run this model on this card, so SampleSmith is using the processor.", flush=True)
+"""
 # Runs every part of a model in one MSST process, so Python, torch and CUDA start once.
-RUNNER = """import gc, json, os, sys
+RUNNER = """import gc, json, os, sys, traceback
 sys.path.insert(0, os.getcwd())  # the MSST folder
 import torch
 import inference
+from utils.settings import get_model_from_config, parse_args_inference
+from utils.model_utils import load_start_checkpoint
+""" + DEVICE + """
+
+def run(job):
+    # inference.proc_folder, on the device picked above (it only knows CUDA, Apple and the processor)
+    args = parse_args_inference(job)
+    model, config = get_model_from_config(args.model_type, args.config_path)
+    if "model_type" in config.training:
+        args.model_type = config.training.model_type
+    fit(config, args.model_type)
+    checkpoint = torch.load(args.start_check_point, weights_only=False, map_location="cpu")
+    load_start_checkpoint(args, model, checkpoint, type_="inference")
+    del checkpoint
+    inference.run_folder(model.to(device).eval(), args, config, device, verbose=True)
+
+
 for i, job in enumerate(json.load(open(sys.argv[1], encoding="utf-8"))):
     print(f"@@part {i}", flush=True)
-    inference.proc_folder(job)
+    try:
+        run(dict(job))
+    except Exception:
+        if not dml:
+            raise
+        traceback.print_exc()
+        use_cpu()
+        gc.collect()
+        print(f"@@part {i}", flush=True)  # the part starts over
+        run(dict(job))
     gc.collect()
-    if torch.cuda.is_available():
+    if cuda:
         torch.cuda.empty_cache()
 """
 # Kept running by Warm: torch, CUDA and the models stay loaded between splits, which saves ~25s each time
@@ -171,10 +300,7 @@ def watch_parent():
 
 
 watch_parent()
-cuda = torch.cuda.is_available()
-device = "cuda:0" if cuda else "cpu"
-print("@@gpu " + (torch.cuda.get_device_name(0) if cuda else "CPU"), flush=True)
-print("Using device: ", device, flush=True)
+""" + DEVICE + """
 models = {}  # (model_type, checkpoint) -> model on the GPU, least recently used first
 
 
@@ -208,8 +334,7 @@ def prepare(job, keep):
     config = load_config(args.model_type, args.config_path)
     if "model_type" in config.training:
         args.model_type = config.training.model_type
-    # stock configs batch up to 8 chunks, which overflows 8 GB cards into Windows' slow shared memory
-    config.inference.batch_size = min(config.inference.batch_size, int(os.environ.get("SAMPLESMITH_BATCH", "2")))
+    fit(config, args.model_type)
     model, new = get(args, keep)
     return args, config, model, new
 
@@ -242,30 +367,45 @@ def load_once(path, *a, **k):
 inference.librosa = type(inference.librosa)("librosa_once")
 inference.librosa.load = load_once
 
+
+def handle(cmd):
+    jobs = [dict(j) for j in cmd["jobs"]]  # copies, so a retry on the CPU starts from the same jobs
+    keep = {(j["model_type"], j["start_check_point"]) for j in jobs}
+    if cmd["cmd"] == "warm":
+        for job in jobs:
+            args, config, model, new = prepare(job, keep)
+            if new:
+                warm(model, args, config)
+        print("@@warmed", flush=True)
+        return
+    loaded.clear()
+    for i, job in enumerate(jobs):
+        print(f"@@part {i}", flush=True)
+        take = job.pop("take", None)
+        args, config, model, _ = prepare(job, keep)
+        # only write the stems this part contributes (HTDemucs FT keeps one of four)
+        inference.prefer_target_instrument = (lambda c, t=take: list(t)) if take else all_stems
+        inference.run_folder(model, args, config, device, verbose=True)
+    loaded.clear()
+    if cuda:
+        torch.cuda.empty_cache()  # give back the working memory so other apps don't spill while idle
+    print(f"@@done {cmd['id']}", flush=True)
+
+
 for line in sys.stdin:
+    cmd = None
     try:
         cmd = json.loads(line)
-        jobs = cmd["jobs"]
-        keep = {(j["model_type"], j["start_check_point"]) for j in jobs}
-        if cmd["cmd"] == "warm":
-            for job in jobs:
-                args, config, model, new = prepare(job, keep)
-                if new:
-                    warm(model, args, config)
-            print("@@warmed", flush=True)
-            continue
-        loaded.clear()
-        for i, job in enumerate(jobs):
-            print(f"@@part {i}", flush=True)
-            take = job.pop("take", None)
-            args, config, model, _ = prepare(job, keep)
-            # only write the stems this part contributes (HTDemucs FT keeps one of four)
-            inference.prefer_target_instrument = (lambda c, t=take: list(t)) if take else all_stems
-            inference.run_folder(model, args, config, device, verbose=True)
-        loaded.clear()
-        if cuda:
-            torch.cuda.empty_cache()  # give back the working memory so other apps don't spill while idle
-        print(f"@@done {cmd['id']}", flush=True)
+        try:
+            handle(cmd)
+        except Exception:
+            if not dml:
+                raise
+            traceback.print_exc()
+            use_cpu()
+            models.clear()
+            gc.collect()
+            handle(cmd)
     except Exception as e:
         traceback.print_exc()
         sys.stdout.flush()
@@ -290,6 +430,14 @@ KK_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.
 KK_MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 
+
+
+def short_gpu(name):
+    """'NVIDIA GeForce RTX 4060' -> 'RTX 4060', 'AMD Radeon RX 7800 XT' -> 'Radeon RX 7800 XT',
+    'Intel(R) Arc(TM) A770 Graphics' -> 'Arc A770', 'Intel(R) Arc(TM) Graphics' -> 'Intel Arc'."""
+    name = re.sub(r"\s+Graphics$", "", re.sub(r"\s+", " ", re.sub(r"\((R|TM)\)", "", name)).strip())
+    short = re.sub(r"^(NVIDIA GeForce|NVIDIA|AMD|Intel)\s+", "", name)
+    return (short if " " in short else name) or "GPU"
 
 
 def console_python():
@@ -1183,6 +1331,7 @@ class Engine:
         # Read once and only write back when the user changes something, so a value edited
         # in settings.json (or set last time) is what the window opens with.
         saved = load_settings()
+        self.picked = set(saved)  # what the user chose; the rest can follow the machine (see show_gpu)
         self.settings = {
             "model": saved.get("model") if saved.get("model") in MODELS else "BS-RoFormer SW",
             "quality": saved.get("quality") if saved.get("quality") in QUALITY else "High",
@@ -1261,6 +1410,7 @@ class Engine:
                     or key == "format" and value not in FORMATS:
                 return
             self.settings[key] = bool(value) if key == "nodrums" else value
+            self.picked.add(key)
             self.save_settings()
             self.emit("settings", dict(self.settings))
             if key == "model":
@@ -1415,23 +1565,31 @@ class Engine:
         if self.warm.gpu_seen.wait(300) and self.warm.gpu:
             name = self.warm.gpu
             self.q.put(("log", f"Step: start engine ({name}) - {time.time() - t:.1f}s"))
-            self.gpu = ("No GPU · splitting will be slow", "warn") if name == "CPU" else (name.replace("NVIDIA GeForce ", ""), "good")
-            self.emit("gpu", self.gpu)
+            self.show_gpu(name)
             self.preload()
             return
         py = console_python()
         try:
             out = subprocess.run(
-                [str(py), "-c", "import torch;print(torch.cuda.get_device_name(0) "
-                                "if torch.cuda.is_available() else 'CPU')"],
+                [str(py), "-c", "import torch\n"
+                                "try:\n    import torch_directml as d\nexcept Exception:\n    d = None\n"
+                                "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "
+                                "d.device_name(0).replace(chr(0), '').strip() if d and d.is_available() else 'CPU')"],
                 capture_output=True, text=True, timeout=120, creationflags=no_window()).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             out = ""
-        name = out.splitlines()[-1] if out else "Unknown"
-        if name in ("CPU", "Unknown"):
+        self.show_gpu(out.splitlines()[-1] if out else "CPU")
+
+    def show_gpu(self, name):
+        if name == "CPU":
             self.gpu = ("No GPU · splitting will be slow", "warn")
+            with self.lock:
+                # High takes several minutes a song on a processor: start on Fast unless the user picked a quality
+                if "quality" not in self.picked and not self.running:
+                    self.settings["quality"] = "Fast"
+                    self.emit("settings", dict(self.settings))
         else:
-            self.gpu = (name.replace("NVIDIA GeForce ", ""), "good")
+            self.gpu = (short_gpu(name), "good")
         self.emit("gpu", self.gpu)
 
     def preload(self):
@@ -1849,7 +2007,9 @@ class Engine:
                 label = parts[index].get("label", parts[index]["folder"])
                 self.q.put(("status", f"Loading {label} ({index + 1}/{total_parts})..."))
                 continue
-            if line.startswith("Using device") and "cuda" not in line:
+            if line.startswith("@@gpu "):
+                continue
+            if line.startswith("Using device") and line.split()[-1] == "cpu":
                 self.q.put(("log", "WARNING: MSST isn't using the GPU, so this will be slow."))
             match = pct_re.search(line)
             if match:
