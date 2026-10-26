@@ -18,7 +18,7 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 ## Features
 
 - **Drag and drop** audio files (WAV, FLAC, MP3, M4A, OGG, AIFF) onto the window, or paste a YouTube link to download and queue a track.
-- **Several separation models**, from fast 4-stem splits to an ensemble and a drum-kit splitter (see the guide below).
+- **Several separation models**, from a 6-stem split to a drum-kit splitter (see the guide below).
 - **Three quality levels**: Fast, High and Best (test-time augmentation).
 - **BPM detection** with DeepRhythm. When the tempo is ambiguous, a second guess is shown, e.g. `140 / 70`.
 - **Key detection** with Essentia's KeyExtractor, shown together with its relative key, e.g. `A min / C maj`.
@@ -56,7 +56,7 @@ Separation models download automatically the first time you use each one.
 ## Usage
 
 1. **Add audio.** Drag files onto the drop area, or paste a YouTube link and add it to the queue (or just download it, tagged with BPM and key).
-2. **Pick a model.** The default is SCNet XL IHF. A short description appears under the selector.
+2. **Pick a model.** The default is BS-RoFormer SW. A short description appears under the selector.
 3. **Pick a quality.** Fast, High or Best.
 4. **Pick a format.** WAV (32-bit float) or MP3 (320 kbps).
 5. **Choose the output folder** if you do not want the default `Stems` folder. "Open" shows it in Explorer.
@@ -73,14 +73,12 @@ Settings (model, quality, format, output folder, options) are remembered in `set
 
 | Model | Stems | When to use it |
 |---|---|---|
-| **SCNet XL IHF** (default) | Vocals, drums, bass, other | Highest-scoring 4-stem model. The best everyday choice. |
+| **BS-RoFormer SW** (default) | Vocals, drums, bass, other, guitar, piano | Highest-scoring multi-stem model you can download. The best everyday choice. |
 | **HTDemucs FT** | Vocals, drums, bass, other | Same model as UVR's `htdemucs_ft` (four fine-tuned specialists). Good second opinion. |
-| **Ensemble IHF + FT** | Vocals, drums, bass, other | Averages SCNet XL IHF and HTDemucs FT. Cleanest results, slowest. |
-| **SCNet XL** | Vocals, drums, bass, other | Same model as UVR's SCNet-XL. |
 | **HTDemucs 6s** | Vocals, drums, bass, other, guitar, piano | Adds guitar and piano. Those two stems can be messy. |
 | **DrumSep** | Kick, snare, toms, cymbals | Feed it a **drums stem**, not a full mix. Key detection is skipped (drums have no key). |
 
-Model weights download automatically into `C:\Music-Source-Separation-Training\models` the first time each one is used.
+Model weights download automatically into `runtime\models` the first time each one is used.
 
 ### Quality levels
 
@@ -90,7 +88,7 @@ Model weights download automatically into `C:\Music-Source-Separation-Training\m
 | **High** | More overlap (4). | About 2x slower than Fast. |
 | **Best (TTA)** | High plus test-time augmentation: flipped and inverted copies are processed and averaged. | About 6x slower than Fast. |
 
-Tip: try Fast first to check the split is what you want, then rerun with Best for the final stems. The Ensemble at Best quality is the slowest combination.
+Tip: try Fast first to check the split is what you want, then rerun with Best for the final stems.
 
 ---
 
@@ -172,7 +170,7 @@ This app is a front end; the real work is done by these projects:
 
 - **[Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)** by ZFTurbo: training and inference framework, plus many of the model weights.
 - **[Demucs / HTDemucs](https://github.com/facebookresearch/demucs)** by Meta Research: HTDemucs FT, HTDemucs 6s.
-- **SCNet** (Sparse Compression Network) by its authors: SCNet XL models.
+- **BS-RoFormer SW** via [python-audio-separator](https://github.com/nomadkaraoke/python-audio-separator).
 - **DrumSep** model by its authors, via MSST.
 - **[DeepRhythm](https://github.com/bleugreen/deeprhythm)**: tempo detection.
 - **[Essentia](https://essentia.upf.edu/)** and **essentia.js** by the Music Technology Group, Universitat Pompeu Fabra: key detection.

@@ -96,9 +96,6 @@ AUDIO_SEP = "https://github.com/nomadkaraoke/python-audio-separator/releases/dow
 BS_ROFORMER_SW = {"folder": "bs_roformer_sw", "type": "bs_roformer", "label": "BS-RoFormer SW",
                   "config": f"{AUDIO_SEP}/BS-Roformer-SW.yaml",
                   "weights": f"{AUDIO_SEP}/BS-Roformer-SW.ckpt"}
-SCNET_XL_IHF = {"folder": "scnet_xl_ihf", "type": "scnet",
-                "config": f"{REL}/v1.0.15/config_musdb18_scnet_xl_more_wide_v5.yaml",
-                "weights": f"{REL}/v1.0.15/model_scnet_ep_36_sdr_10.0891.ckpt"}
 HTDEMUCS_FT = [
     {"folder": f"htdemucs_ft_{stem}", "type": "htdemucs", "take": [stem], "label": f"htdemucs_ft {stem}",
      "config": f"{RAW}/config_musdb18_htdemucs.yaml", "weights": f"{DEMUCS}/{weights}"}
@@ -112,28 +109,10 @@ MODELS = {
         "has_drums": True,
         "parts": [BS_ROFORMER_SW],
     },
-    "SCNet XL IHF": {
-        "desc": "Vocals, drums, bass, other. Highest-scoring 4-stem model.",
-        "has_drums": True,
-        "parts": [SCNET_XL_IHF],
-    },
     "HTDemucs FT": {
         "desc": "Vocals, drums, bass, other. Same as UVR's htdemucs_ft.",
         "has_drums": True,
         "parts": HTDEMUCS_FT,
-    },
-    "Ensemble: BS-RoFormer SW + SCNet XL IHF + HTDemucs FT": {
-        "desc": "Averages all three on vocals, drums, bass, other (SW counts double). "
-                "Guitar and piano come from SW. Slowest.",
-        "has_drums": True,
-        "parts": [dict(BS_ROFORMER_SW, weight=2), SCNET_XL_IHF] + HTDEMUCS_FT,
-    },
-    "SCNet XL": {
-        "desc": "Vocals, drums, bass, other. Same model as UVR's SCNet-XL.",
-        "has_drums": True,
-        "parts": [{"folder": "scnet_xl", "type": "scnet",
-                   "config": f"{REL}/v1.0.13/config_musdb18_scnet_xl.yaml",
-                   "weights": f"{REL}/v1.0.13/model_scnet_ep_54_sdr_9.8051.ckpt"}],
     },
     "HTDemucs 6 stems": {
         "desc": "Adds piano and guitar stems. Those two can be messy.",
@@ -260,6 +239,22 @@ def warm(model, args, config):
     demix(config, model, np.zeros((2, n), dtype=np.float32), device, model_type=args.model_type)
 
 
+all_stems = inference.prefer_target_instrument
+loaded = {}  # the song is read once per split, not once per part
+read_audio = inference.librosa.load
+
+
+def load_once(path, *a, **k):
+    key = (path, repr(a), repr(sorted(k.items())))
+    if key not in loaded:
+        loaded[key] = read_audio(path, *a, **k)
+    mix, sr = loaded[key]
+    return mix.copy(), sr
+
+
+inference.librosa = type(inference.librosa)("librosa_once")
+inference.librosa.load = load_once
+
 for line in sys.stdin:
     try:
         cmd = json.loads(line)
@@ -272,10 +267,15 @@ for line in sys.stdin:
                     warm(model, args, config)
             print("@@warmed", flush=True)
             continue
+        loaded.clear()
         for i, job in enumerate(jobs):
             print(f"@@part {i}", flush=True)
+            take = job.pop("take", None)
             args, config, model, _ = prepare(job, keep)
+            # only write the stems this part contributes (HTDemucs FT keeps one of four)
+            inference.prefer_target_instrument = (lambda c, t=take: list(t)) if take else all_stems
             inference.run_folder(model, args, config, device, verbose=True)
+        loaded.clear()
         if cuda:
             torch.cuda.empty_cache()  # give back the working memory so other apps don't spill while idle
         print(f"@@done {cmd['id']}", flush=True)
@@ -1761,7 +1761,8 @@ class Engine:
                          "pcm_type": "FLOAT",  # 32-bit float WAV: lossless, no clipping before we export
                          "bigshifts": s["shifts"], "use_tta": s["tta"]})
         if self.warm.usable():
-            tail, end = self.read_output(self.warm.run(jobs), parts, bars)
+            warm_jobs = [dict(j, take=p["take"]) if p.get("take") else j for j, p in zip(jobs, parts)]
+            tail, end = self.read_output(self.warm.run(warm_jobs), parts, bars)
             if self.stop_flag:
                 raise StopRequested()
             if end == "@@done":
