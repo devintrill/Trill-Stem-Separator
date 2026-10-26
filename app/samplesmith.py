@@ -1200,7 +1200,8 @@ class Engine:
     def snapshot(self):
         with self.lock:
             return {
-                "models": [{"name": n, "drums": m["has_drums"], "stems": m["stems"]} for n, m in MODELS.items()],
+                "models": [{"name": n, "drums": m["has_drums"], "stems": m["stems"], "desc": m["desc"]}
+                           for n, m in MODELS.items()],
                 "qualities": list(QUALITY), "formats": list(FORMATS),
                 "settings": dict(self.settings), "files": self.file_rows(),
                 "status": self.status, "gpu": self.gpu, "log": self.log_lines[-500:],
@@ -1414,7 +1415,7 @@ class Engine:
         if self.warm.gpu_seen.wait(300) and self.warm.gpu:
             name = self.warm.gpu
             self.q.put(("log", f"Step: start engine ({name}) - {time.time() - t:.1f}s"))
-            self.gpu = ("No GPU - will be slow", "warn") if name == "CPU" else (name.replace("NVIDIA GeForce ", ""), "good")
+            self.gpu = ("No GPU · splitting will be slow", "warn") if name == "CPU" else (name.replace("NVIDIA GeForce ", ""), "good")
             self.emit("gpu", self.gpu)
             self.preload()
             return
@@ -1428,7 +1429,7 @@ class Engine:
             out = ""
         name = out.splitlines()[-1] if out else "Unknown"
         if name in ("CPU", "Unknown"):
-            self.gpu = ("No GPU - will be slow", "warn")
+            self.gpu = ("No GPU · splitting will be slow", "warn")
         else:
             self.gpu = (name.replace("NVIDIA GeForce ", ""), "good")
         self.emit("gpu", self.gpu)
@@ -1607,8 +1608,7 @@ class Engine:
             if self.yt_busy or not url:
                 return
             if not re.match(r"^(https?://)?([\w-]+\.)+\w+/\S*$", url):
-                if not self.running:
-                    self.set_status("That's not a link", "warn")
+                self.emit("yt", dict(self.yt_state(), error="That doesn't look like a link."))
                 return
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
@@ -1672,10 +1672,13 @@ class Engine:
         self.add_paths([path])
 
     def on_yt_fail(self, msg):
-        self.yt_reset()
+        # The reason shows under the Add key (which turns into Retry), not in the status line.
+        self.yt_busy = False
+        reason = re.sub(r"^\[[^\]]+\]\s*[\w-]+:\s*", "", msg.replace("YouTube download failed: ", ""))
+        self.emit("yt", dict(self.yt_state(), error=reason[:140]))
         self.log_line("ERROR: " + msg)
         if not self.running:
-            self.set_status(msg, "bad")
+            self.set_status("Ready")
 
     def download(self, url, dest):
         if dest.exists() and dest.stat().st_size > 0:
@@ -2091,11 +2094,13 @@ class Api:
     def seek(self, frac):
         self._engine.seek(frac)
 
-    def drag_out(self, paths):
-        """Drag stem files out of the window (into FL Studio, Explorer, ...).
+    def drag_out(self, paths, picture=None, grab_x=0, grab_y=0, radius=0):
+        """Drag stem files out of the window (into a DAW, Explorer, ...).
 
         A web page can't start an operating-system file drag, so the page calls this while the mouse
-        button is still down and the window's own WinForms form runs a native file drag instead."""
+        button is still down and the window's own WinForms form runs a native file drag instead.
+        The page also sends a picture of what's dragged (a PNG, base64); it rides along under the
+        pointer in its own window, because outside the app Windows would only show a cursor."""
         paths = [str(Path(p)) for p in paths or [] if Path(p).is_file()]
         if not paths or os.name != "nt":
             return False
@@ -2106,7 +2111,24 @@ class Api:
 
             def run():
                 data = DataObject(DataFormats.FileDrop, Array[String](paths))
-                form.DoDragDrop(data, DragDropEffects.Copy)
+                ghost = follow = None
+                if picture:
+                    try:
+                        ghost = DragPicture(picture, int(grab_x), int(grab_y), int(radius))
+                        follow = ghost.follow  # one object, so it can be unhooked again
+                        form.GiveFeedback += follow
+                        self._bridge.emit("drag_native", True)  # the page hides its own copy
+                    except Exception as e:
+                        file_log(f"Drag picture failed: {e}")
+                        if ghost:
+                            ghost.close()
+                        ghost = None
+                try:
+                    form.DoDragDrop(data, DragDropEffects.Copy)
+                finally:
+                    if ghost:
+                        form.GiveFeedback -= follow
+                        ghost.close()
             self.dragging_out = True
             try:
                 form.Invoke(Action(run))  # returns once the drag is dropped or cancelled
@@ -2117,6 +2139,71 @@ class Api:
         except Exception as e:
             self._engine.q.put(("log", f"Couldn't start the drag ({e})."))
             return False
+
+
+class DragPicture:
+    """A small borderless window showing the dragged pad, kept under the pointer while a file drag
+    runs. It is click-through and never takes focus, so the drop still lands on whatever is below it."""
+
+    def __init__(self, png_b64, grab_x, grab_y, radius):
+        import ctypes
+        import clr
+        clr.AddReference("System.Drawing")
+        clr.AddReference("System.Windows.Forms")
+        from System import Convert
+        from System.Drawing import Bitmap, Region
+        from System.Drawing.Drawing2D import GraphicsPath
+        from System.IO import MemoryStream
+        from System.Windows.Forms import Form, FormBorderStyle, FormStartPosition
+
+        self.u = u = ctypes.windll.user32
+        u.SetWindowPos.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_uint)
+        u.GetWindowLongW.argtypes = (ctypes.c_void_p, ctypes.c_int)
+        u.SetWindowLongW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_long)
+        u.SetLayeredWindowAttributes.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_ubyte, ctypes.c_uint)
+        self.grab = (grab_x, grab_y)
+        self.bmp = Bitmap(MemoryStream(Convert.FromBase64String(png_b64)))
+        w = self.win = Form()
+        w.FormBorderStyle = getattr(FormBorderStyle, "None")  # "None" is a Python keyword
+        w.ShowInTaskbar = False
+        w.StartPosition = FormStartPosition.Manual
+        w.ClientSize = self.bmp.Size
+        w.BackgroundImage = self.bmp
+        width, height, d = self.bmp.Width, self.bmp.Height, max(2, radius * 2)
+        path = GraphicsPath()  # rounded corners, like the pad
+        path.AddArc(0, 0, d, d, 180, 90)
+        path.AddArc(width - d, 0, d, d, 270, 90)
+        path.AddArc(width - d, height - d, d, d, 0, 90)
+        path.AddArc(0, height - d, d, d, 90, 90)
+        path.CloseFigure()
+        w.Region = Region(path)
+        self.hwnd = ctypes.c_void_p(w.Handle.ToInt64())
+        # layered (for the slight see-through), click-through, never activated, no taskbar button, on top
+        style = u.GetWindowLongW(self.hwnd, -20)
+        u.SetWindowLongW(self.hwnd, -20, style | 0x80000 | 0x20 | 0x08000000 | 0x80 | 0x8)
+        u.SetLayeredWindowAttributes(self.hwnd, 0, 235, 2)
+        self.move(0x40)  # SWP_SHOWWINDOW
+
+    def move(self, extra=0):
+        import ctypes
+        import ctypes.wintypes
+        pt = ctypes.wintypes.POINT()
+        self.u.GetCursorPos(ctypes.byref(pt))
+        # HWND_TOPMOST; SWP_NOSIZE | SWP_NOACTIVATE
+        self.u.SetWindowPos(self.hwnd, -1, pt.x - self.grab[0], pt.y - self.grab[1], 0, 0, 0x1 | 0x10 | extra)
+
+    def follow(self, sender, e):
+        e.UseDefaultCursors = True
+        self.move()
+
+    def close(self):
+        try:
+            self.win.Close()
+            self.win.Dispose()
+            self.bmp.Dispose()
+        except Exception:
+            pass
 
 
 def set_icon(window):

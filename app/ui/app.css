@@ -1209,7 +1209,7 @@ body.locked .pill.good i { background: var(--pad-lit); }
   animation: none !important; transition: opacity 120ms var(--ease); opacity: 0.95;
   box-shadow: 0 24px 50px rgba(0, 0, 0, 0.55), 0 0 0 1.5px var(--pad-lit), 0 0 24px -4px rgba(243, 201, 74, 0.4) !important;
 }
-.drag-ghost.away { opacity: 0; }
+.drag-ghost.away, .drag-ghost.native { opacity: 0; }  /* native: the picture window has taken over */
 .drag-ghost .rm { display: none; }
 /* what's left behind is the empty state: a sunken well; a stem keeps its dimmed name over a flat line */
 .lifted, .lifted:hover, .lifted:active, .strip.drag.lifted:hover, .strip.drag.lifted:active, .chip.lifted:hover {
@@ -1238,3 +1238,63 @@ body.locked .pill.good i { background: var(--pad-lit); }
 .seg { background-color: rgba(10, 10, 16, 0.55); border-color: transparent; box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55); }
 .seg .thumb { border-color: transparent; background: linear-gradient(180deg, #30303c, #262631);  /* same face as the keys */
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 3px 0 #121218, 0 6px 10px rgba(0, 0, 0, 0.35); }
+
+/* a removed stem waits as an empty well while its Undo shows */
+.strip.gone, .strip.drag.gone:hover, .strip.drag.gone:active {
+  animation: none !important; transform: none !important; cursor: default; pointer-events: none;
+  background: rgba(10, 10, 16, 0.5) !important;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), inset 0 -1px 0 rgba(255, 255, 255, 0.03) !important;
+}
+.strip.gone > *, .strip.gone .grip, .strip.gone .sm-row, .strip.gone .wave, .strip.gone .rm { visibility: hidden; }
+.strip.gone .top, .strip.gone .nm { visibility: visible; }
+.strip.gone .nm { color: var(--muted-dim); }
+.strip.gone::after { content: ''; position: absolute; left: 12px; right: 12px; bottom: 18px; height: 2px;
+  border-radius: 1px; background: rgba(255, 255, 255, 0.07); }
+
+/* Undo: a raised notice above the footer; its gold bar drains, then the file goes to the Recycle Bin */
+.toast {
+  position: fixed; left: 50%; bottom: 112px; z-index: 55; transform: translateX(-50%); overflow: hidden;
+  display: flex; align-items: center; gap: 16px; padding: 9px 9px 12px 18px; border-radius: 14px; font-size: 13.5px;
+  background: linear-gradient(180deg, #30303c, #262631);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 3px 0 #121218, 0 14px 28px rgba(0, 0, 0, 0.5);
+  animation: toastin 360ms var(--spring) backwards;
+}
+@keyframes toastin { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.toast #toast-undo { color: var(--pad-lit); background: #1d1d25; box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5); }
+.toast .toast-bar { position: absolute; left: 0; bottom: 0; width: 100%; height: 3px; background: var(--pad-lit); transform-origin: left; }
+.toast.run .toast-bar { animation: drain 5s linear forwards; }
+@keyframes drain { to { transform: scaleX(0); } }
+
+/* errors show where they happen, in one soft red: a failed link turns Add into a red Retry with the reason below */
+.yt-error { margin: 8px 4px 0; font-size: 12.5px; color: #f2a6a6; }
+.yt.failed .field { box-shadow: var(--sunk), inset 0 0 0 1px rgba(242, 166, 166, 0.4); }
+.btn.tint.failed, .btn.tint.failed:hover:not(:disabled) {
+  color: #1c0e0e; background: linear-gradient(180deg, #f39a95, #e2716c);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 3px 0 #8a3b37, 0 6px 10px rgba(0, 0, 0, 0.35);
+}
+.pill.warn { color: var(--muted); }
+.pill.warn i { background: #5a5a62; box-shadow: none; }
+
+/* menus are raised panels; the chosen item sits pressed in with its light on */
+.menu { padding: 6px; border: 0; border-radius: 14px; background: linear-gradient(180deg, #30303c, #262631);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 3px 0 #121218, 0 18px 34px rgba(0, 0, 0, 0.55); }
+.menu button { border-radius: 9px; padding: 9px 12px; }
+.menu button:hover { background: rgba(10, 10, 16, 0.3); color: var(--foreground); }
+.menu button.on { background: rgba(10, 10, 16, 0.5); box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5); }
+.menu .item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.menu .sub { font-size: 11.5px; color: var(--muted-dim); white-space: normal; }
+
+/* the log is a sunken well */
+.log pre { border: 0; border-radius: 12px; background: rgba(10, 10, 16, 0.6); box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55); color: #9a9aa4; }
+
+/* hover hints */
+.tip {
+  position: fixed; left: 0; top: 0; z-index: 66; max-width: 320px; padding: 7px 10px; border-radius: 9px; pointer-events: none;
+  font-size: 12px; line-height: 1.35; color: var(--foreground); background: #3a3a46;
+  box-shadow: 0 2px 0 #121218, 0 8px 16px rgba(0, 0, 0, 0.45); opacity: 0; transition: opacity 120ms var(--ease);
+}
+.tip.on { opacity: 1; }
+
+/* credit, in the window's bottom margin */
+.credit { position: fixed; left: 0; right: 0; bottom: 3px; z-index: 3; text-align: center; pointer-events: none;
+  font-size: 10.5px; letter-spacing: 0.02em; color: var(--muted-dim); opacity: 0.75; }

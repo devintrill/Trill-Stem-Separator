@@ -55,7 +55,7 @@ Separation models download automatically the first time you use each one.
 
 ## Usage
 
-1. **Add audio.** Drag files onto the drop area, or paste a YouTube link and press Add. A YouTube track is saved once, as a WAV named with its BPM and key, and like any sample you can drag it straight into FL Studio without separating it.
+1. **Add audio.** Drag files onto the drop area, or paste a YouTube link and press Add. A YouTube track is saved once, as a WAV named with its BPM and key, and like any sample you can drag it straight into your DAW without separating it.
 2. **Pick a model.** The default is BS-RoFormer SW. A short description appears under the selector.
 3. **Pick a quality.** Fast, High or Best.
 4. **Pick a format.** WAV (32-bit float) or MP3 (320 kbps).

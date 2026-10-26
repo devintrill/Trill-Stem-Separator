@@ -34,6 +34,7 @@
         <input id="yt" class="field" placeholder="Paste YouTube link" spellcheck="false" autocomplete="off">
         <button class="btn tint" id="yt-add"><span class="fill"></span><span class="lbl">Add</span></button>
       </div>
+      <div class="yt-error" id="yt-error" role="alert" hidden></div>
       <div class="list" id="files"></div>
     </section>
 
@@ -67,7 +68,7 @@
       <button class="play" id="play" disabled><svg class="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg><svg class="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg></button>
       <input type="range" class="seek" id="seek" min="0" max="1000" value="0" disabled>
       <span class="time" id="ptime">0:00 / 0:00</span>
-      <button class="chip drag" id="all" title="Drag into FL Studio"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg>All</button>
+      <button class="chip drag" id="all" title="Drag into your DAW"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg>All</button>
     </div>
     <div class="strips" id="strips"></div>
   </section>
@@ -85,6 +86,8 @@
   </footer>
 </div>
 
+<div class="toast" id="toast" role="status" hidden><span id="toast-text"></span><button class="btn tint sm" id="toast-undo">Undo</button><i class="toast-bar"></i></div>
+<div class="credit">Made by Trill · © 2026</div>
 <div class="dropping" id="dropping"><div>Drop to add</div></div>
 <script>/*SCRIPT*/</script>
 </body>

@@ -19,7 +19,9 @@
     return {
       set(items, current) {
         menu.replaceChildren(...items.map((it, i) => {
-          const b = el('button', it.value === current ? 'on' : '', it.label);
+          const b = el('button', it.value === current ? 'on' : '');
+          if (it.sub) { const t = el('span', 'item'); t.append(el('span', '', it.label), el('span', 'sub', it.sub)); b.append(t); }
+          else b.textContent = it.label;
           b.addEventListener('click', (e) => { e.stopPropagation(); root.classList.remove('open'); onPick(it.value, i); });
           return b;
         }));
@@ -85,7 +87,7 @@
   function renderSettings() {
     const st = S.settings;
     if (!qualitySeg || !st.model) return;
-    modelSel.set(S.models.map((m) => ({ value: m.name, label: m.name })), st.model);
+    modelSel.set(S.models.map((m) => ({ value: m.name, label: m.name, sub: m.desc })), st.model);
     qualitySeg.set(st.quality);
     formatSeg.set(st.format);
     const drums = (S.models.find((m) => m.name === st.model) || {}).drums;
@@ -116,7 +118,7 @@
         x.addEventListener('pointerdown', (e) => e.stopPropagation());
         r.append(grip, el('span', 'name', f.name), el('span', 'tags'), el('span', 'size', f.size), x);
         // the original can go straight into the DAW too, e.g. a YouTube rip you don't want split
-        r.title = 'Drag into FL Studio';
+        r.title = 'Drag into your DAW';
         dragOut(r, () => [f.path]);
         rows.set(f.path, r);
       }
@@ -241,7 +243,12 @@
     b.disabled = on;
     b.classList.toggle('busy', on);
     b.classList.toggle('analyzing', on && slow);
-    const text = on && y.label ? y.label : 'Add';
+    // a failed link: the key turns red as Retry and the reason shows under the row
+    const err = !on && y.error ? y.error : '';
+    b.classList.toggle('failed', !!err);
+    b.closest('.yt').classList.toggle('failed', !!err);
+    $('yt-error').hidden = !err; $('yt-error').textContent = err;
+    const text = on && y.label ? y.label : err ? 'Retry' : 'Add';
     if (lbl.textContent !== text) lbl.textContent = text;
     const pct = String(on ? (y.pct != null ? y.pct : slow ? 1 : 0) : 0);
     if (b.style.getPropertyValue('--p') !== pct) b.style.setProperty('--p', pct);
@@ -254,6 +261,7 @@
   /* ---------- stems + preview ---------- */
   let resultSel;
   function renderResults(res) {
+    commitRemoval();  // the pads are about to be rebuilt; a waiting removal goes through now
     S.results = res;
     const shown = res.items[res.selected] && res.items[res.selected].name;
     if (shown !== waves.of) waves = { of: shown, names: [], peaks: [] };
@@ -267,7 +275,7 @@
     $('strips').dataset.sig = '';
     $('strips').replaceChildren(...r.files.map((f, i) => {
       const s = el('div', 'strip drag'); s.dataset.name = f.instr; s.style.animationDelay = (i * 110) + 'ms';
-      s.title = 'Drag into FL Studio · double-click to show the file';
+      s.title = 'Drag into your DAW · double-click to show the file';
       const grip = el('span', 'grip'); grip.append(svg(ICON_GRIP));
       const nm = el('div', 'nm'); nm.append(grip, el('span', 'label', title(f.instr)));
       const top = el('div', 'top');
@@ -280,11 +288,11 @@
         row.append(b);
       }
       top.append(nm, row);
-      // x: the stem's file goes to the Recycle Bin
+      // x: the stem empties, with a short Undo before its file goes to the Recycle Bin
       const rm = el('button', 'rm'); rm.append(svg(ICON_X));
       rm.setAttribute('aria-label', `Remove ${title(f.instr)}`);
-      rm.title = 'Move to the Recycle Bin';
-      rm.addEventListener('click', (e) => { e.stopPropagation(); call('remove_stem', res.selected, f.instr); });
+      rm.title = 'Remove';
+      rm.addEventListener('click', (e) => { e.stopPropagation(); removeStem(res.selected, f.instr, s); });
       rm.addEventListener('pointerdown', (e) => e.stopPropagation());
       s.append(top, rm);
       dragOut(s, () => [f.path]);
@@ -293,6 +301,29 @@
     }));
     renderPlayer();
     drawWaves();
+  }
+
+  /* ---------- removing a stem: its pad empties and a short Undo shows; the file goes to the Recycle Bin when
+     the bar runs out, or straight away if another stem is removed or the pads change ---------- */
+  let removal = null;  // { index, instr, strip, timer }
+  function removeStem(index, instr, strip) {
+    commitRemoval();
+    strip.classList.add('gone');
+    $('toast-text').textContent = `${title(instr)} removed`;
+    const toast = $('toast');
+    toast.hidden = false; toast.classList.remove('run'); void toast.offsetWidth; toast.classList.add('run');
+    removal = { index, instr, strip, timer: setTimeout(commitRemoval, 5000) };
+  }
+  function commitRemoval() {
+    if (!removal) return;
+    const r = removal; removal = null;
+    clearTimeout(r.timer); $('toast').hidden = true;
+    call('remove_stem', r.index, r.instr);
+  }
+  function undoRemoval() {
+    if (!removal) return;
+    clearTimeout(removal.timer); removal.strip.classList.remove('gone');
+    removal = null; $('toast').hidden = true;
   }
 
   // Before the first result: sunken, empty pads for the stems the chosen model will make, so the
@@ -366,16 +397,44 @@
       if (!start || sent || !(e.buttons & 1)) return;
       if (Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 5) {
         sent = true; start = null;
+        const pic = dragPicture(node, grab);
         lift(node, grab, e.clientX, e.clientY);
-        Promise.resolve(call('drag_out', paths())).finally(land);  // resolves when the drag is dropped
+        // resolves when the drag is dropped
+        Promise.resolve(call('drag_out', paths(), pic.png, pic.gx, pic.gy, pic.radius)).finally(land);
       }
     });
     const end = () => { start = null; };
     node.addEventListener('pointerup', end); node.addEventListener('pointercancel', end);
   }
 
-  // While something is dragged out, a copy of it follows the pointer over the window (the native drag only
-  // shows a cursor) and the original stays behind, faded. The page keeps getting dragover events meanwhile.
+  // A picture of what's dragged (face, gold edge, name, waveform) at screen resolution. Python shows it in a
+  // small window that stays under the pointer outside the app too, where Windows would only show a cursor.
+  function dragPicture(node, grab) {
+    const r = node.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 12;
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+    const c = cv.getContext('2d'); c.scale(dpr, dpr);
+    const face = c.createLinearGradient(0, 0, 0, r.height);
+    face.addColorStop(0, '#30303c'); face.addColorStop(1, '#262631');
+    c.fillStyle = face; c.fillRect(0, 0, r.width, r.height);
+    c.strokeStyle = '#f3c94a'; c.lineWidth = 3;
+    c.beginPath(); c.roundRect(1.5, 1.5, r.width - 3, r.height - 3, Math.max(0, radius - 1.5)); c.stroke();
+    const label = node.querySelector('.label, .name');
+    const lr = (label || node).getBoundingClientRect(), x = label ? lr.left - r.left : 14;
+    c.fillStyle = '#f4f4f0'; c.textBaseline = 'middle';
+    c.font = label ? getComputedStyle(label).font : getComputedStyle(node).font;
+    c.fillText((label || node).textContent.trim(), x, label ? lr.top - r.top + lr.height / 2 : r.height / 2, r.width - x - 10);
+    node.querySelectorAll('.wave > canvas').forEach((src) => {
+      const s = src.getBoundingClientRect();
+      try { c.drawImage(src, s.left - r.left, s.top - r.top, s.width, s.height); } catch (e) { /* nothing drawn yet */ }
+    });
+    return { png: cv.toDataURL('image/png').split(',')[1], gx: Math.round(grab[0] * dpr), gy: Math.round(grab[1] * dpr),
+             radius: Math.round(radius * dpr) };
+  }
+
+  // While something is dragged out, a copy of it follows the pointer over the window and the original stays
+  // behind as an empty well. Once Python's picture window takes over (drag_native) the page's copy hides.
   let ghost = null, grabAt = [0, 0];
   function lift(node, grab, x, y) {
     land();
@@ -442,6 +501,28 @@
   let dragDepth = 0, dragTimer = 0;
   function endDrag() { dragDepth = 0; clearTimeout(dragTimer); document.body.classList.remove('dragging'); }
 
+  /* ---------- hover hints: any title shows as a raised bubble in the app's style, not a Windows tooltip ---------- */
+  const tip = el('div', 'tip'); tip.setAttribute('role', 'tooltip'); document.body.append(tip);
+  let tipFor = null, tipTimer = 0;
+  function hideTip() { clearTimeout(tipTimer); tipFor = null; tip.classList.remove('on'); }
+  function showTip(t) {
+    if (!t.isConnected || !t.dataset.tip || S.draggingOut) return;
+    tip.textContent = t.dataset.tip; tip.classList.add('on');
+    const r = t.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+    const x = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2));
+    const y = r.top - h - 8 < 8 ? r.bottom + 8 : r.top - h - 8;
+    tip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  }
+  document.addEventListener('pointerover', (e) => {
+    const t = e.target.closest && e.target.closest('[title], [data-tip]');
+    if (!t || t === tipFor) return;
+    if (t.hasAttribute('title')) { t.dataset.tip = t.title; t.removeAttribute('title'); }  // no native tooltip too
+    hideTip(); tipFor = t;
+    tipTimer = setTimeout(() => showTip(t), 450);
+  });
+  document.addEventListener('pointerout', (e) => { if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip(); });
+  document.addEventListener('pointerdown', hideTip, true);
+
   /* ---------- events from Python ---------- */
   const on = {
     settings(v) { S.settings = v; renderSettings(); },
@@ -456,6 +537,7 @@
     results: renderResults,
     player: setPlayer,
     peaks: setPeaks,
+    drag_native() { if (ghost) ghost.classList.add('native'); },
   };
   window.trill = { batch(list) { for (const [k, v] of list) { try { on[k] && on[k](v); } catch (e) { console.error(k, e); } } } };
 
@@ -471,9 +553,11 @@
     const yt = () => call('add_youtube', $('yt').value);
     $('yt-add').addEventListener('click', yt);
     $('yt').addEventListener('keydown', (e) => { if (e.key === 'Enter') yt(); });
+    $('yt').addEventListener('input', () => { if (S.yt.error) setYt({ busy: false }); });  // editing clears the error
     $('go').addEventListener('click', () => call('start'));
     $('stop').addEventListener('click', () => call('stop'));
     $('log-btn').addEventListener('click', () => showLog(!$('log').classList.contains('open')));
+    $('toast-undo').addEventListener('click', undoRemoval);
     $('play').addEventListener('click', () => call('toggle_play'));
     const seek = $('seek');
     seek.addEventListener('input', () => { S.seeking = true; seek.style.setProperty('--v', (seek.value / 10) + '%');
