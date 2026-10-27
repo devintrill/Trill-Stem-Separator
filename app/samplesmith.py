@@ -73,6 +73,9 @@ except ImportError:
     fatal("SampleSmith isn't fully set up.\n\nStart it with SampleSmith.exe - it finishes the setup.")
 
 APP_NAME = "SampleSmith"
+# Bump with every release. A GitHub release tagged with a higher version (v1.0.1, ...) shows "Update" in the app.
+VERSION = "1.0.0"
+RELEASES = "https://api.github.com/repos/devintrill/trill-stem-separator/releases/latest"
 MSST_DIR = RUNTIME / "engine"
 MODELS_DIR = RUNTIME / "models"
 SETTINGS_FILE = DATA_DIR / "settings.json"
@@ -117,6 +120,7 @@ MODELS = {
         "parts": HTDEMUCS_FT,
     },
 }
+DEFAULT_MODEL = "BS-RoFormer SW"  # what a new install starts on; setup downloads it (get_default_model)
 
 # Quality presets: overlap = MSST num_overlap (each sample is processed this many times;
 # 2 is about what UVR does), TTA = also process flipped/inverted copies and average (3x time),
@@ -1299,6 +1303,71 @@ def part_files(p):
     return folder / "config.yaml", folder / ("model" + Path(p["weights"]).suffix)
 
 
+def fetch(url, dest, progress=None, stopped=lambda: False):
+    """Download url to dest (through a .part file, so an interrupted download never looks finished).
+    progress(fraction) is called at most ~10 times a second; stopped() is checked between 1 MB chunks."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.unlink(missing_ok=True)  # leftover from an interrupted download
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got, last = 0, 0.0
+            while True:
+                if stopped():
+                    raise StopRequested()
+                chunk = resp.read(1 << 20)  # 1 MB
+                if not chunk:
+                    break
+                out.write(chunk)
+                got += len(chunk)
+                now = time.monotonic()
+                if progress and total > 0 and (now - last >= 0.1 or got >= total):
+                    last = now
+                    progress(min(1.0, got / total))
+        if got == 0 or (total > 0 and got < total):
+            raise OSError(f"incomplete download: {got} of {total} bytes")
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+
+
+def get_default_model():
+    """Setup runs this (samplesmith.py --get-default-model) so the first split starts right away instead of
+    with a ~700 MB download. Progress lines are indented, which the setup window shows next to its step."""
+    parts = MODELS[DEFAULT_MODEL]["parts"]
+    files = [(url, dest) for p in parts for url, dest in zip((p["config"], p["weights"]), part_files(p))]
+    shown = -1
+    for i, (url, dest) in enumerate(files):
+        if dest.exists() and dest.stat().st_size > 0:
+            continue
+
+        def progress(f, i=i):
+            nonlocal shown
+            pct = int((i + f) / len(files) * 100)
+            if pct != shown:
+                shown = pct
+                print(f"  {DEFAULT_MODEL} model: {pct}%", flush=True)
+
+        fetch(url, dest, progress)
+    print("  OK", flush=True)
+
+
+def newer_release():
+    """(version, page) of the latest GitHub release when it's newer than this copy, else None."""
+    def parts(v):
+        return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+    req = urllib.request.Request(RELEASES, headers={"User-Agent": APP_NAME, "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        latest = json.load(resp)
+    tag, page = latest.get("tag_name") or "", latest.get("html_url") or ""
+    if parts(tag) > parts(VERSION) and page.startswith("https://github.com/"):
+        return tag.lstrip("vV"), page
+    return None
+
+
 class Engine:
     def __init__(self, emit):
         self.emit = emit
@@ -1326,6 +1395,7 @@ class Engine:
         self.detect_lock = threading.Lock()  # one detection at a time
         self.status = ("Ready", "")
         self.gpu = ("Checking GPU", "")
+        self.update = None  # (version, release page) once a newer release is found
         self.log_lines = []
 
         # Read once and only write back when the user changes something, so a value edited
@@ -1333,7 +1403,7 @@ class Engine:
         saved = load_settings()
         self.picked = set(saved)  # what the user chose; the rest can follow the machine (see show_gpu)
         self.settings = {
-            "model": saved.get("model") if saved.get("model") in MODELS else "BS-RoFormer SW",
+            "model": saved.get("model") if saved.get("model") in MODELS else DEFAULT_MODEL,
             "quality": saved.get("quality") if saved.get("quality") in QUALITY else "High",
             "format": saved.get("format") if saved.get("format") in FORMATS else "WAV",
             "nodrums": bool(saved.get("nodrums", True)),
@@ -1344,6 +1414,18 @@ class Engine:
         threading.Thread(target=self.check_gpu, daemon=True).start()
         threading.Thread(target=ensure_youtube_support, daemon=True).start()
         threading.Thread(target=self.detect_loop, daemon=True).start()
+        threading.Thread(target=self.check_update, daemon=True).start()
+
+    def check_update(self):
+        # once per launch, quietly: offline, rate-limited or no releases yet all just mean no notice
+        try:
+            found = newer_release()
+        except Exception as e:
+            file_log(f"Update check skipped ({e})")
+            return
+        if found:
+            self.update = found
+            self.emit("update", {"version": found[0]})
 
     # ---------- state sent to the window ----------
     def snapshot(self):
@@ -1356,6 +1438,7 @@ class Engine:
                 "status": self.status, "gpu": self.gpu, "log": self.log_lines[-500:],
                 "run": self.run_state(), "yt": self.yt_state(), "results": self.result_rows(),
                 "player": self.player_row(),
+                "update": {"version": self.update[0]} if self.update else None,
             }
 
     def file_rows(self):
@@ -1842,40 +1925,19 @@ class Engine:
     def download(self, url, dest):
         if dest.exists() and dest.stat().st_size > 0:
             return
-        dest.parent.mkdir(parents=True, exist_ok=True)
         self.q.put(("log", f"Downloading {dest.parent.name}/{dest.name} (first time only)..."))
-        tmp = dest.with_name(dest.name + ".part")
-        tmp.unlink(missing_ok=True)  # leftover from an interrupted download
+
+        def progress(pct):
+            self.q.put(("progress", pct))
+            self.q.put(("status", f"Downloading {dest.parent.name} model: {pct * 100:.0f}%"))
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
-            with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as out:
-                total = int(resp.headers.get("Content-Length") or 0)
-                got, last = 0, 0.0
-                while True:
-                    if self.stop_flag:
-                        raise StopRequested()
-                    chunk = resp.read(1 << 20)  # 1 MB
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    got += len(chunk)
-                    now = time.monotonic()
-                    if total > 0 and (now - last >= 0.1 or got >= total):  # ~10 UI updates/s max
-                        last = now
-                        pct = min(1.0, got / total)
-                        self.q.put(("progress", pct))
-                        self.q.put(("status", f"Downloading {dest.parent.name} model: {pct * 100:.0f}%"))
-            if got == 0 or (total > 0 and got < total):
-                raise OSError(f"incomplete download: {got} of {total} bytes")
+            fetch(url, dest, progress, lambda: self.stop_flag)
         except StopRequested:
-            tmp.unlink(missing_ok=True)
             raise
         except Exception as e:
-            tmp.unlink(missing_ok=True)
             raise RuntimeError(f"Couldn't download {dest.parent.name} model ({e}). "
                                "Check your internet connection and try again.")
-        tmp.replace(dest)
 
     def worker(self, s):
         result = "error"
@@ -2215,6 +2277,12 @@ class Api:
     def open_output(self):
         open_folder(self._engine.settings["out"])
 
+    def open_update(self):
+        # only the release page the update check found; the page never passes a URL in
+        if self._engine.update:
+            import webbrowser
+            webbrowser.open(self._engine.update[1])
+
     def open_folder_of(self, path):
         p = Path(path)
         if os.name == "nt" and p.exists():
@@ -2546,5 +2614,12 @@ def hide_console():
 
 
 if __name__ == "__main__":
+    if "--get-default-model" in sys.argv:  # setup, step 7
+        try:
+            get_default_model()
+        except Exception as e:
+            print(f"Couldn't download the model ({e})", flush=True)
+            sys.exit(1)
+        sys.exit(0)
     hide_console()
     main()

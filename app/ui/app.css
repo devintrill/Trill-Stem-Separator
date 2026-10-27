@@ -1321,6 +1321,13 @@ body.locked .pill.good i { background: var(--pad-lit); }
 /* Undo sits over the footer's empty middle, clear of the stem pads and their S/M keys */
 .toast { bottom: 47px; }
 
+/* "Update": only there when a newer release is out; a pill like the GPU one, its light on because it's an action */
+.pills { display: flex; align-items: center; gap: 8px; }
+.pill.update { cursor: pointer; color: var(--foreground); transition: transform var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+/* (the :not()s outrank the "checking" pulse a pill without a tone gets) */
+.pill.update:not(.good):not(.warn):not(.bad) i { background: var(--pad-lit); box-shadow: 0 0 8px rgba(243, 201, 74, 0.6); animation: none; }
+.pill.update:hover { transform: translateY(-1px); color: var(--pad-lit); }
+
 /* Separate with no samples: an unlit key (no gold, no glow) that lights up once there's something to split */
 .btn.cta.idle:disabled { transform: none; cursor: default; color: var(--muted-dim);
   background: linear-gradient(180deg, #2a2a35, #22222c);

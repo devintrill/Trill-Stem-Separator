@@ -202,7 +202,10 @@ if (-not (Test-Path $Models) -and (Test-Path $OldModels)) {
     # weights only: /S skips folders left empty once the old install's code files are excluded
     robocopy $OldModels $Models /S /XF *.py *.pyc /NFL /NDL /NJH /NJS /NP | Out-Null
 }
-Say '  OK'
+# The default model (about 700 MB), so the first split starts right away. Its progress lines show next to
+# this step. If it can't download now, the app fetches it on the first split instead, so setup carries on.
+& $Py (Join-Path $Root 'app\samplesmith.py') --get-default-model
+if ($LASTEXITCODE -ne 0) { Say '  The model will download on your first split instead.' Yellow }
 
 # 8. Node.js runs Essentia's key detection (and helps YouTube downloads).
 Step 8 'Setting up key detection'

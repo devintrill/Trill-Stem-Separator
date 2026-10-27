@@ -583,6 +583,12 @@
     player: setPlayer,
     peaks: setPeaks,
     drag_native() { if (ghost) ghost.classList.add('native'); },
+    // a newer release is out: a small lit pill by the GPU one, which opens its download page
+    update(u) {
+      const b = $('update');
+      b.hidden = !u;
+      if (u) b.title = `Version ${u.version} is out. Click to download it.`;
+    },
   };
   window.trill = { batch(list) { for (const [k, v] of list) { try { on[k] && on[k](v); } catch (e) { console.error(k, e); } } } };
 
@@ -591,6 +597,7 @@
     modelSel = select($('model'), (v) => call('set_setting', 'model', v));
     resultSel = select($('result'), (v) => call('select_result', v));
     $('nodrums').addEventListener('click', () => call('set_setting', 'nodrums', !S.settings.nodrums));
+    $('update').addEventListener('click', () => call('open_update'));
     $('out-change').addEventListener('click', () => call('pick_output'));
     $('out-open').addEventListener('click', () => call('open_output'));
     $('drop').addEventListener('click', () => call('pick_files'));
@@ -645,6 +652,7 @@
     s.log.forEach(addLog);
     setYt(s.yt); setRun(s.run);
     renderResults(s.results); setPlayer(s.player);
+    on.update(s.update);
     requestAnimationFrame(frame);
     booted = true;
     // fonts can change widths after first paint: re-place the segmented thumbs

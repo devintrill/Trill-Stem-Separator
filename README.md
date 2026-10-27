@@ -10,7 +10,7 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 
 - The window is HTML/CSS/JS (`ui/`) displayed with **pywebview** using Microsoft Edge **WebView2**.
 - All processing runs in `app/samplesmith.py`, in a private Python 3.11 environment that setup creates in `runtime/`.
-- Separation models are downloaded automatically the first time you use them.
+- Setup downloads the default model (BS-RoFormer SW), so the first split starts right away; other models download the first time you use them.
 - Runs on NVIDIA cards through CUDA, on AMD Radeon and Intel Arc cards through DirectML, and on the processor when there's no suitable card. Setup detects which and downloads only that.
 - Tested on an **NVIDIA RTX 4060 (8 GB)**, with both CUDA and DirectML.
 
@@ -53,7 +53,9 @@ After that, SampleSmith.exe opens the app directly. If anything goes missing, it
 
 To uninstall, delete the SampleSmith folder, the shortcuts and `%APPDATA%\SampleSmith`.
 
-Separation models download automatically the first time you use each one.
+Setup also downloads the default model, BS-RoFormer SW. HTDemucs FT downloads automatically the first time you use it.
+
+When a new version is out, a small **Update** button appears at the top right; it opens the download page.
 
 ---
 
@@ -80,7 +82,7 @@ Settings (model, quality, format, output folder, options) are remembered in `set
 | **BS-RoFormer SW** (default) | Vocals, drums, bass, other, guitar, piano | Highest-scoring multi-stem model you can download. The best everyday choice. |
 | **HTDemucs FT** | Vocals, drums, bass, other | Same model as UVR's `htdemucs_ft` (four fine-tuned specialists). Good second opinion. |
 
-Model weights download automatically into `runtime\models` the first time each one is used.
+Model weights live in `runtime\models`. BS-RoFormer SW is downloaded during setup; HTDemucs FT the first time it's used.
 
 ### Quality levels
 
@@ -163,6 +165,15 @@ SampleSmith\
 %APPDATA%\SampleSmith\  settings.json, samplesmith.log, install.log
 Music\SampleSmith\      Default Stems and Downloads folders
 ```
+
+---
+
+## Releasing a new version
+
+1. Raise `VERSION` near the top of `app/samplesmith.py` (for example `1.0.1`).
+2. On GitHub, publish a release of this repository tagged with that version (`v1.0.1`) and attach the zip.
+
+Copies with an older `VERSION` check the latest release once per launch and show **Update**, which opens the release page. The check sends nothing but a plain request to GitHub; if it fails (offline, no releases yet), nothing is shown.
 
 ---
 
