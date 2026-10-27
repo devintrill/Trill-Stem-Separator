@@ -1831,9 +1831,10 @@ class Engine:
 
     def on_yt_fail(self, msg):
         # The reason shows under the Add key (which turns into Retry), not in the status line.
+        # A link that isn't one (add_youtube) shows its reason too, but keeps Add: retrying a typo can't help.
         self.yt_busy = False
         reason = re.sub(r"^\[[^\]]+\]\s*[\w-]+:\s*", "", msg.replace("YouTube download failed: ", ""))
-        self.emit("yt", dict(self.yt_state(), error=reason[:140]))
+        self.emit("yt", dict(self.yt_state(), error=reason[:140], retry=True))
         self.log_line("ERROR: " + msg)
         if not self.running:
             self.set_status("Ready")
@@ -2496,8 +2497,9 @@ def main():
     bridge = Bridge()
     engine = Engine(bridge.emit)
     api = Api(engine, bridge)
-    # one fixed size, like UVR: no resizing or maximizing (fit_on_screen shrinks it only on small screens)
-    window = webview.create_window(APP_NAME, html=build_page(), js_api=api, width=1080, height=820,
+    # one fixed size, like UVR: no resizing or maximizing (fit_on_screen shrinks it only on small screens).
+    # 860 tall: the settings card keeps its Save to row with the progress bar showing in the footer.
+    window = webview.create_window(APP_NAME, html=build_page(), js_api=api, width=1080, height=860,
                                    resizable=False, background_color="#0d0d12", text_select=False)
     bridge.window = window
 

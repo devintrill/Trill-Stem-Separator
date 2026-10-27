@@ -1305,6 +1305,22 @@ body.locked .pill.good i { background: var(--pad-lit); }
 .shell { padding-bottom: 30px; }
 .credit { left: auto; right: 22px; bottom: 8px; line-height: 14px; text-align: right; }
 
+/* the log opens as a raised panel over the stems, just above the footer, like the menus: nothing else moves or
+   gets squeezed (opening it in the footer took 160 px from the cards above and cut the settings card off) */
+.log, .log.open {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 15px); z-index: 20; height: auto; margin: 0; padding: 8px;
+  border-radius: 16px; background: linear-gradient(180deg, #30303c, #262631);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 3px 0 #121218, 0 18px 34px rgba(0, 0, 0, 0.55);
+  opacity: 0; visibility: hidden; transform: translateY(8px); pointer-events: none;
+  transition: opacity 200ms var(--ease), transform 260ms var(--ease), visibility 0s linear 260ms;
+}
+.log.open { opacity: 1; visibility: visible; transform: none; pointer-events: auto;
+  transition: opacity 200ms var(--ease), transform 260ms var(--ease), visibility 0s; }
+.log pre { height: 164px; }  /* with the padding, exactly the stems card it covers */
+
+/* Undo sits over the footer's empty middle, clear of the stem pads and their S/M keys */
+.toast { bottom: 47px; }
+
 /* Separate with no samples: an unlit key (no gold, no glow) that lights up once there's something to split */
 .btn.cta.idle:disabled { transform: none; cursor: default; color: var(--muted-dim);
   background: linear-gradient(180deg, #2a2a35, #22222c);

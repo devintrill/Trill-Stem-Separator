@@ -252,12 +252,13 @@
     b.disabled = on;
     b.classList.toggle('busy', on);
     b.classList.toggle('analyzing', on && slow);
-    // a failed link: the key turns red as Retry and the reason shows under the row
-    const err = !on && y.error ? y.error : '';
-    b.classList.toggle('failed', !!err);
+    // a failed download: the key turns red as Retry and the reason shows under the row.
+    // Not a link at all: just the reason; the key stays Add, since retrying the same text can't work.
+    const err = !on && y.error ? y.error : '', retry = !!err && !!y.retry;
+    b.classList.toggle('failed', retry);
     b.closest('.yt').classList.toggle('failed', !!err);
     $('yt-error').hidden = !err; $('yt-error').textContent = err;
-    const text = on && y.label ? y.label : err ? 'Retry' : 'Add';
+    const text = on && y.label ? y.label : retry ? 'Retry' : 'Add';
     if (lbl.textContent !== text) lbl.textContent = text;
     const pct = String(on ? (y.pct != null ? y.pct : slow ? 1 : 0) : 0);
     if (b.style.getPropertyValue('--p') !== pct) b.style.setProperty('--p', pct);
