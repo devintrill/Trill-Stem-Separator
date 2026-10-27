@@ -74,6 +74,43 @@
       <button class="chip drag" id="all" title="Drag into your DAW"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg>All</button>
     </div>
     <div class="strips" id="strips"></div>
+    <!-- the pencil on a stem opens this over the stems: Match, Loop and MIDI make new files from it -->
+    <div class="editor" id="editor" hidden>
+      <div class="ed-head">
+        <svg class="ed-pen" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/></svg>
+        <span class="ed-title" id="ed-name"></span>
+        <div class="seg ed-tabs" id="ed-tabs"></div>
+        <span class="ed-from" id="ed-from"></span>
+        <button class="x" id="ed-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="ed-row">
+        <div class="ed-tool" data-tool="match">
+          <span class="ed-label">Your project</span>
+          <input class="field ed-bpm" id="ed-bpm" inputmode="decimal" placeholder="Tempo" spellcheck="false" autocomplete="off" maxlength="6">
+          <span class="ed-unit">BPM</span>
+          <div class="ed-key" id="ed-key">
+            <button class="ed-step" id="ed-prev" aria-label="Key down">‹</button>
+            <button class="ed-keytext" id="ed-keytext"></button>
+            <button class="ed-step" id="ed-next" aria-label="Key up">›</button>
+            <button class="ed-mode" id="ed-mode"></button>
+          </div>
+          <span class="ed-hint ed-plan" id="ed-plan"></span>
+        </div>
+        <div class="ed-tool" data-tool="loop">
+          <div class="seg ed-bars" id="ed-bars"></div>
+          <div class="ed-key">
+            <button class="ed-step" id="ed-bar-prev" aria-label="Earlier bar">‹</button>
+            <span class="ed-keytext ed-bar" id="ed-bar"></span>
+            <button class="ed-step" id="ed-bar-next" aria-label="Later bar">›</button>
+          </div>
+        </div>
+        <div class="ed-tool" data-tool="midi">
+          <span class="ed-hint" id="ed-midi-hint"></span>
+        </div>
+        <button class="btn cta ed-go" id="ed-go"></button>
+      </div>
+      <div class="ed-out" id="ed-out"></div>
+    </div>
   </section>
 
   <footer class="card card-featured foot arrive">

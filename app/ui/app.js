@@ -5,6 +5,7 @@
   const call = (name, ...args) => { try { return api()[name](...args); } catch (e) { return Promise.resolve(); } };
   const svg = (inner, vb = '0 0 24 24') => { const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); s.setAttribute('viewBox', vb); s.innerHTML = inner; return s; };
   const ICON_X = '<path d="M6 6l12 12M18 6L6 18"/>';
+  const ICON_PEN = '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>';
   const ICON_GRIP = '<circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>';
   const title = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -273,6 +274,9 @@
   function renderResults(res) {
     commitRemoval();  // the pads are about to be rebuilt; a waiting removal goes through now
     S.results = res;
+    // the edit panel belongs to one stem of one result; it closes when that's no longer what's shown
+    const cur = res.items[res.selected];
+    if (ED.instr && (ED.index !== res.selected || !cur || !cur.files.some((f) => f.instr === ED.instr))) closeEditor();
     const shown = res.items[res.selected] && res.items[res.selected].name;
     if (shown !== waves.of) waves = { of: shown, names: [], peaks: [] };
     const box = $('stems');
@@ -304,13 +308,145 @@
       rm.title = 'Remove';
       rm.addEventListener('click', (e) => { e.stopPropagation(); removeStem(res.selected, f.instr, s); });
       rm.addEventListener('pointerdown', (e) => e.stopPropagation());
-      s.append(top, rm);
+      // pencil: the edit panel for this stem, over the stems card
+      const ed = el('button', 'ed'); ed.append(svg(ICON_PEN));
+      ed.setAttribute('aria-label', `Edit ${title(f.instr)}`);
+      ed.title = 'Edit';
+      ed.addEventListener('click', (e) => { e.stopPropagation(); openEditor(res.selected, f.instr); });
+      ed.addEventListener('pointerdown', (e) => e.stopPropagation());
+      s.append(top, ed, rm);
       dragOut(s, () => [f.path]);
       s.addEventListener('dblclick', () => call('open_folder_of', f.path));
       return s;
     }));
     renderPlayer();
     drawWaves();
+  }
+
+  /* ---------- edit: the pencil on a stem opens this panel over the stems. Match makes a copy at your project's
+     tempo and key (remembered for next time) that drags straight into the DAW. ---------- */
+  const KEYS = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+  const DRUMS = ['drums', 'kick', 'snare', 'toms', 'cymbals'];
+  const TOOLS = { Match: 'match', Loop: 'loop', MIDI: 'midi' };
+  const ACTION = { match: 'Match', loop: 'Cut loop', midi: 'Make MIDI' };
+  const BARS = { '1 bar': 1, '2 bars': 2, '4 bars': 4, '8 bars': 8 };
+  // key: the project key the panel shows ('F min'); bars/start/total: the loop
+  const ED = { index: -1, instr: null, tool: 'match', key: null, bars: 4, start: 1, total: 0 };
+  let edTabs, edBars;
+  const firstOf = (v) => (v ? String(v).split(' / ')[0] : '');
+  const keyOf = (k) => { const m = /^([A-G][#b]?) (maj|min)$/.exec(firstOf(k)); return m && KEYS.includes(m[1]) ? { t: KEYS.indexOf(m[1]), mode: m[2] } : null; };
+  function openEditor(index, instr) {
+    const r = S.results.items[index];
+    if (!r) return;
+    Object.assign(ED, { index, instr, key: S.settings.project_key || null, start: 1, total: 0 });
+    $('ed-name').textContent = title(instr);
+    $('ed-from').textContent = [r.bpm && `${firstOf(r.bpm)} BPM`, firstOf(r.key)].filter(Boolean).join(' · ');
+    $('ed-bpm').value = S.settings.project_bpm || '';
+    $('editor').hidden = false;
+    // the sliders measure their buttons, so they're placed once the panel is showing
+    edBars.set(Object.keys(BARS).find((k) => BARS[k] === ED.bars));
+    setTool(ED.tool);
+  }
+  function closeEditor() { $('editor').hidden = true; ED.instr = null; }
+  function setTool(tool) {
+    ED.tool = tool;
+    edTabs.set(Object.keys(TOOLS).find((k) => TOOLS[k] === tool));
+    for (const t of document.querySelectorAll('.ed-tool')) t.hidden = t.dataset.tool !== tool;
+    $('ed-out').replaceChildren();
+    $('ed-go').disabled = false; $('ed-go').textContent = ACTION[tool];
+    renderEditor();
+    if (tool === 'loop') loopInfo(true);
+    if (tool === 'match' && !$('ed-bpm').value) $('ed-bpm').focus();
+  }
+  function renderEditor() {
+    if (!ED.instr) return;
+    const drums = DRUMS.includes(ED.instr), k = keyOf(ED.key);
+    $('ed-key').classList.toggle('off', drums);
+    $('ed-keytext').textContent = drums ? 'Drums keep their pitch' : k ? KEYS[k.t] : 'Any key';
+    $('ed-keytext').title = k && !drums ? 'Click to keep the key' : '';
+    $('ed-mode').hidden = drums || !k;
+    $('ed-mode').textContent = k ? k.mode : '';
+    $('ed-prev').hidden = $('ed-next').hidden = drums;
+    $('ed-bar').textContent = `from bar ${ED.start}` + (ED.total ? ` of ${ED.total}` : '');
+    $('ed-bar-prev').disabled = ED.start <= 1;
+    $('ed-bar-next').disabled = !!ED.total && ED.start >= ED.total;
+    // MIDI follows one line; drums have none
+    $('ed-midi-hint').textContent = drums ? 'Drums have no melody to turn into notes.'
+      : 'Follows the main line, one note at a time. Best on bass and lead vocals.';
+    $('ed-go').hidden = ED.tool === 'midi' && drums;
+    renderPlan();
+  }
+  // Match says what it will do before you press it: the same maths as the app (tempo_ratio, key_shift)
+  const shiftOf = (src, dst) => {
+    const a = keyOf(src), b = keyOf(dst);
+    if (!a || !b) return 0;
+    const t = a.t + (a.mode === 'min' && b.mode === 'maj' ? 3 : a.mode === 'maj' && b.mode === 'min' ? -3 : 0);
+    return ((((b.t - t + 6) % 12) + 12) % 12) - 6;
+  };
+  function renderPlan() {
+    const r = S.results.items[ED.index], plan = $('ed-plan');
+    if (!r) { plan.textContent = ''; return; }
+    const want = parseFloat($('ed-bpm').value), src = parseFloat(firstOf(r.bpm)), drums = DRUMS.includes(ED.instr);
+    const parts = [];
+    let ratio = 1, semis = 0;
+    if (want >= 40 && want <= 300 && src) {
+      ratio = [0.5, 1, 2].map((f) => want / (src * f)).reduce((a, b) => (Math.abs(Math.log(b)) < Math.abs(Math.log(a)) ? b : a));
+      const pct = Math.round((ratio - 1) * 100);
+      parts.push(pct === 0 ? 'already in time' : `${Math.abs(pct)}% ${pct > 0 ? 'faster' : 'slower'}`);
+    }
+    if (!drums && ED.key && keyOf(r.key)) {
+      semis = shiftOf(r.key, ED.key);
+      parts.push(semis === 0 ? 'same key' : `${semis > 0 ? 'up' : 'down'} ${Math.abs(semis)} semitone${Math.abs(semis) === 1 ? '' : 's'}`);
+    }
+    // past these, stretching and shifting start to sound processed
+    const big = Math.abs(ratio - 1) > 0.2 || Math.abs(semis) > 4;
+    plan.textContent = parts.join(' · ') + (big ? ' · a big move, may sound processed' : '');
+    plan.classList.toggle('warn', big);
+  }
+  // Loop starts where you paused: the bar under the playhead. Changing the length keeps the bar if it still fits.
+  function loopInfo(fromPlayhead) {
+    const at = fromPlayhead && S.player.pos > 0.05 ? S.player.pos : null, which = [ED.index, ED.instr, ED.bars];
+    $('ed-bar').textContent = 'finding the bars…';
+    call('loop_info', ED.index, ED.instr, ED.bars, at).then((info) => {
+      if (!info || which.join() !== [ED.index, ED.instr, ED.bars].join()) { renderEditor(); return; }
+      ED.total = info.total;
+      ED.start = at ? info.bar : Math.max(1, Math.min(ED.start, info.total || 1));
+      renderEditor();
+    });
+  }
+  function stepBar(d) { ED.start = Math.max(1, ED.total ? Math.min(ED.total, ED.start + d) : ED.start + d); renderEditor(); }
+  function setKey(key) { ED.key = key; renderEditor(); call('set_setting', 'project_key', key); }
+  function stepKey(d) {
+    const k = keyOf(ED.key);
+    if (k) return setKey(`${KEYS[(k.t + d + 12) % 12]} ${k.mode}`);
+    const own = keyOf(S.results.items[ED.index] && S.results.items[ED.index].key);  // the first step starts from the sample's key
+    setKey(own ? `${KEYS[own.t]} ${own.mode}` : 'C min');
+  }
+  function saveBpm() { call('set_setting', 'project_bpm', $('ed-bpm').value.trim() || null); }
+  function runTool() {
+    $('ed-out').replaceChildren();
+    const opts = { match: { bpm: $('ed-bpm').value.trim() || null, key: ED.key }, loop: { bars: ED.bars, start: ED.start },
+                   midi: {} }[ED.tool];
+    call('edit_stem', ED.index, ED.instr, ED.tool, opts);
+  }
+  const BUSY = { match: 'Matching', loop: 'Cutting', midi: 'Listening' };
+  function showEdit(v) {
+    if (v.instr !== ED.instr || v.tool !== ED.tool || $('editor').hidden) return;
+    const go = $('ed-go'), out = $('ed-out'), busy = v.state === 'busy';
+    go.disabled = busy; go.textContent = busy ? BUSY[v.tool] : ACTION[v.tool];
+    if (v.state === 'error') out.replaceChildren(el('div', 'ed-note', v.error));
+    if (v.state !== 'done') return;
+    if (v.tool === 'loop') { ED.start = v.bar; ED.total = v.total; renderEditor(); }
+    // what it made, as a sample row: drag it into the DAW, double-click to show the file
+    const row = el('div', 'file'), grip = el('span', 'grip'), tags = el('span', 'tags');
+    grip.append(svg(ICON_GRIP));
+    if (v.tool === 'midi') tags.append(el('span', 'badge none', `${v.notes} notes`));
+    else fillTags(tags, { bpm: v.bpm, key: v.key, done: true });
+    row.append(grip, el('span', 'name', v.name), tags, el('span', 'size', v.size));
+    row.title = 'Drag into your DAW · double-click to show ' + (v.paths.length > 1 ? 'the files' : 'the file');
+    dragOut(row, () => v.paths);
+    row.addEventListener('dblclick', () => call('open_folder_of', v.paths[0]));
+    out.replaceChildren(row);
   }
 
   /* ---------- removing a stem: its pad empties and a short Undo shows; the file goes to the Recycle Bin when
@@ -570,7 +706,10 @@
 
   /* ---------- events from Python ---------- */
   const on = {
-    settings(v) { S.settings = v; renderSettings(); },
+    settings(v) {
+      S.settings = v; renderSettings();
+      if (ED.instr && document.activeElement !== $('ed-bpm')) $('ed-bpm').value = v.project_bpm || '';  // a typo comes back empty
+    },
     files(v) { endDrag(); renderFiles(v); },
     status: setStatus,
     gpu: setGpu,
@@ -583,6 +722,7 @@
     player: setPlayer,
     peaks: setPeaks,
     drag_native() { if (ghost) ghost.classList.add('native'); },
+    edit: showEdit,
     // a newer release is out: a small lit pill by the GPU one, which opens its download page
     update(u) {
       const b = $('update');
@@ -598,6 +738,19 @@
     resultSel = select($('result'), (v) => call('select_result', v));
     $('nodrums').addEventListener('click', () => call('set_setting', 'nodrums', !S.settings.nodrums));
     $('update').addEventListener('click', () => call('open_update'));
+    $('ed-close').addEventListener('click', closeEditor);
+    $('ed-prev').addEventListener('click', () => stepKey(-1));
+    $('ed-next').addEventListener('click', () => stepKey(1));
+    $('ed-keytext').addEventListener('click', () => { if (keyOf(ED.key)) setKey(null); else stepKey(0); });
+    $('ed-mode').addEventListener('click', () => { const k = keyOf(ED.key); if (k) setKey(`${KEYS[k.t]} ${k.mode === 'min' ? 'maj' : 'min'}`); });
+    $('ed-bpm').addEventListener('change', saveBpm);
+    $('ed-bpm').addEventListener('input', renderPlan);
+    $('ed-bpm').addEventListener('keydown', (e) => { if (e.key === 'Enter') { saveBpm(); runTool(); } });
+    $('ed-go').addEventListener('click', runTool);
+    edTabs = seg($('ed-tabs'), Object.keys(TOOLS), (v) => setTool(TOOLS[v]));
+    edBars = seg($('ed-bars'), Object.keys(BARS), (v) => { ED.bars = BARS[v]; ED.total = 0; $('ed-out').replaceChildren(); loopInfo(false); });
+    $('ed-bar-prev').addEventListener('click', () => stepBar(-1));
+    $('ed-bar-next').addEventListener('click', () => stepBar(1));
     $('out-change').addEventListener('click', () => call('pick_output'));
     $('out-open').addEventListener('click', () => call('open_output'));
     $('drop').addEventListener('click', () => call('pick_files'));
@@ -632,6 +785,7 @@
 
     // Space plays or pauses the stems; 1-9 solo a stem. Typing in a field is left alone.
     document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !$('editor').hidden) { closeEditor(); return; }
       if (e.ctrlKey || e.altKey || e.metaKey || e.repeat || e.target.closest('input, textarea')) return;
       if (e.code === 'Space' && S.player.ready) { e.preventDefault(); call('toggle_play'); return; }
       const strip = /^[1-9]$/.test(e.key) && document.querySelectorAll('.strip.drag')[+e.key - 1];

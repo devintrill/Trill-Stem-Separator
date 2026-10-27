@@ -875,6 +875,225 @@ def fmt_time(seconds):
     return f"{s // 60}:{s % 60:02d}"
 
 
+def save_audio(path, data, sr):
+    """Write stems the way the chosen format wants: 32-bit float WAV, 24-bit FLAC or 320 kbps MP3."""
+    import soundfile as sf
+    ext = Path(path).suffix.lower()
+    if ext == ".mp3":
+        sf.write(path, np.clip(data, -1.0, 1.0), sr, format="MP3", bitrate_mode="CONSTANT", compression_level=0.0)
+    elif ext == ".flac":  # FLAC has no float format, so clip and store as 24-bit
+        sf.write(path, np.clip(data, -1.0, 1.0), sr, format="FLAC", subtype="PCM_24")
+    else:
+        sf.write(path, data, sr, subtype="FLOAT")
+
+
+# ---------- edit: match a stem to the project's tempo and key ----------
+KEY_RE = re.compile(r"([A-G][#b]?) (maj|min)")
+NOTE_INDEX = {n: i for i, n in enumerate(NOTE_NAMES)} | {"Db": 1, "D#": 3, "Gb": 6, "G#": 8, "A#": 10}
+DRUM_STEMS = {"drums", "kick", "snare", "toms", "cymbals"}  # no key to match: they keep their pitch
+
+
+def parse_key(key):
+    """'F min' (or 'F min / Ab maj') -> (5, 'min'); None if it isn't a key."""
+    m = KEY_RE.fullmatch((primary(key) or "").strip())
+    return (NOTE_INDEX[m.group(1)], m.group(2)) if m and m.group(1) in NOTE_INDEX else None
+
+
+def key_shift(src, dst):
+    """Semitones that move key src onto key dst, the short way round (-6..+5). A major key and its relative
+    minor share their notes, so A min -> C maj is 0 and A min -> D maj is +2."""
+    a, b = parse_key(src), parse_key(dst)
+    if not a or not b:
+        return 0
+    tonic = a[0] + {("min", "maj"): 3, ("maj", "min"): -3}.get((a[1], b[1]), 0)  # as the relative in dst's mode
+    return (b[0] - tonic + 6) % 12 - 6
+
+
+def project_bpm(v):
+    """A project tempo as typed (40-300 BPM, '140' or '92.5'), else None."""
+    try:
+        v = round(float(v), 2)
+    except (TypeError, ValueError):
+        return None
+    return (int(v) if v == int(v) else v) if 40 <= v <= 300 else None
+
+
+def tempo_ratio(src_bpm, dst_bpm):
+    """Speed factor from the stem's tempo to the project's. It reads the stem at half or double time when that
+    means a smaller stretch: a 70 BPM loop in a 140 BPM project is already in time."""
+    src = float(primary(src_bpm))
+    return min((dst_bpm / (src * f) for f in (0.5, 1, 2)), key=lambda r: abs(np.log(r)))
+
+
+def match_audio(src, dest, instr, ratio, semis):
+    """Stretch and shift src into dest with Rubber Band (ffmpeg's rubberband filter): crisp transients for
+    drums, formants kept for vocals so they don't sound chipmunked, best pitch quality for the rest."""
+    import imageio_ffmpeg
+    import soundfile as sf
+    mode = ("transients=crisp:detector=percussive" if instr in DRUM_STEMS
+            else "formant=preserved:pitchq=quality" if instr == "vocals" else "pitchq=quality")
+    flt = f"rubberband=tempo={ratio:.6f}:pitch={2 ** (semis / 12):.6f}:channels=together:{mode}"
+    tmp = Path(tempfile.mkdtemp(prefix="samplesmith-match-")) / "out.wav"
+    try:
+        run = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-y", "-i", str(src), "-af", flt,
+                              "-c:a", "pcm_f32le", str(tmp)], capture_output=True, text=True, creationflags=no_window())
+        if run.returncode != 0 or not tmp.exists():
+            raise RuntimeError(run.stderr.strip().splitlines()[-1] if run.stderr.strip() else "ffmpeg failed")
+        data, sr = sf.read(tmp, dtype="float32")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        save_audio(dest, data, sr)
+    finally:
+        shutil.rmtree(tmp.parent, ignore_errors=True)
+
+
+class EditRefused(Exception):
+    """An edit that can't be done on this stem; the message is shown in the panel as it is."""
+
+
+def edge_fades(seg, sr, fade_in=0.002, fade_out=0.004):
+    """Ramp a cut's ends so it doesn't click (2 ms in, 4 ms out)."""
+    n_in, n_out = (min(int(sr * f), len(seg) // 2) for f in (fade_in, fade_out))
+    if n_in > 1:
+        seg[:n_in] *= np.linspace(0.0, 1.0, n_in, dtype=np.float32)[:, None]
+    if n_out > 1:
+        seg[-n_out:] *= np.linspace(1.0, 0.0, n_out, dtype=np.float32)[:, None]
+    return seg
+
+
+def bar_starts(path, bpm):
+    """Where each bar starts, for a 4/4 sample at about bpm: (starts in seconds, length, seconds per bar).
+    The detected tempo is close but rounded (114 for a song at 113.6 drifts 15 ms a bar), and a beat tracker
+    left to itself can lock onto 2/3 or 3/2 of it. So this searches the tempo within 1.5% of bpm and the grid's
+    offset together: the grid whose beats land on the most hits, with the bar line where the low end hits
+    hardest. The kick lands on one far more often than the snare does, and the snare is usually the loudest
+    hit overall, on two and four."""
+    import librosa
+    y, sr = librosa.load(str(path), sr=22050, mono=True)
+    hop = 256
+    hits = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    kick = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop, fmax=150, n_mels=32)
+    if not hits.any():
+        raise EditRefused("Couldn't find a beat in this sample.")
+    fps = sr / hop
+
+    def at(env, offset, step):
+        idx = np.round(np.arange(offset, len(env), step)).astype(int)
+        idx = idx[idx < len(env)]
+        return float(env[idx].mean()) if len(idx) else 0.0
+
+    def fit(tempo):
+        beat = 60.0 / tempo * fps  # frames per beat
+        o = max(range(int(4 * beat)), key=lambda o: at(hits, o, beat) + at(kick, o, 4 * beat))
+        return at(hits, o, beat) + at(kick, o, 4 * beat), o, tempo
+
+    _, offset, tempo = max(fit(t) for t in np.arange(bpm * 0.985, bpm * 1.015, bpm * 0.0005))
+    length, bar = len(y) / sr, 240.0 / tempo
+    starts = np.arange(offset / fps, length, bar)
+    # onset frames trail the attack by a few ms, so a cut there would clip each kick: move the grid back to
+    # where the hits start (the waveform passing 20% of its local peak), less 2 ms
+    level, lead = np.abs(y), []
+    for t in starts:
+        a = int(max(t - 0.05, 0) * sr)
+        w = level[a:int((t + 0.05) * sr)]
+        if len(w) and w.max() > 0:
+            lead.append((a + int(np.argmax(w > 0.2 * w.max()))) / sr - t)
+    if lead:
+        starts = np.clip(starts + float(np.median(lead)) - 0.002, 0, None)
+    return starts, length, bar
+
+
+def loop_starts(grid, bars):
+    """The bar starts a loop of bars bars can begin on and still end inside the sample (grid: bar_starts)."""
+    starts, length, bar = grid
+    return [t for t in starts if t + bars * bar <= length + 0.01]
+
+
+def make_loop(src, grid, bars, start, folder, stem_name):
+    """bars bars of src from bar start (1-based, clamped to what fits), cut exactly bars bars long at the
+    sample's own tempo so it loops in time. Returns (file, the bar it used, how many bars a loop can start on)."""
+    import soundfile as sf
+    span = bars * grid[2]
+    fits = loop_starts(grid, bars)
+    if not fits:
+        raise EditRefused(f"This sample is shorter than {bars} bar{'s' if bars > 1 else ''}.")
+    used = min(max(start, 1), len(fits))
+    data, sr = sf.read(src, dtype="float32", always_2d=True)
+    a = int(round(fits[used - 1] * sr))
+    seg = edge_fades(data[a:a + int(round(span * sr))].copy(), sr)
+    dest = folder / f"{stem_name} - {bars} bar{'s' if bars > 1 else ''} from bar {used}{src.suffix}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    save_audio(dest, seg, sr)
+    return dest, used, len(fits)
+
+
+def audio_to_midi(src, dest, instr, bpm):
+    """The stem's main line as MIDI notes (one note at a time: pYIN pitch tracking), at the sample's tempo so the
+    notes sit on the DAW's grid. Bass is tracked from E1, everything else from C2. Returns the note count.
+    A note ends where the pitch changes, where the same note is played again (a bass pumping one root is many
+    notes, not one long one) or where the sound drops away; pitch is smoothed first so a wobble isn't a note."""
+    import librosa
+    from scipy.ndimage import median_filter
+    y, sr = librosa.load(str(src), sr=16000, mono=True)
+    hop = 256
+    low = "E1" if instr == "bass" else "C2"
+    high = "G4" if instr == "bass" else "C7"
+    f0, voiced, _ = librosa.pyin(y, fmin=librosa.note_to_hz(low), fmax=librosa.note_to_hz(high), sr=sr,
+                                 frame_length=2048, hop_length=hop)
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0][:len(f0)]
+    # "loud" is the stem's usual loud level, not its single loudest moment: one spike would make every
+    # other note look like silence
+    loud = max(float(np.percentile(rms[rms > 0], 95)) if (rms > 0).any() else 0.0, 1e-9)
+    pitch = np.where(voiced, np.round(librosa.hz_to_midi(np.nan_to_num(f0, nan=1.0))), -1).astype(int)
+    pitch = median_filter(pitch, size=5, mode="nearest")  # ~80 ms: smooths wobble and one-frame octave slips
+    pitch[rms < 0.06 * loud] = -1  # the tail has died away: the note is over
+    # where each note is struck (not backtracked: that would put the next note's attack inside this one)
+    attacks = set(librosa.onset.onset_detect(y=y, sr=sr, hop_length=hop, units="frames").tolist())
+    notes, i, step = [], 0, hop / sr
+    settle = int(0.12 / step)  # a second attack inside a note's first 120 ms is the same pluck, not a new note
+    while i < len(pitch):
+        j = i + 1
+        while j < len(pitch) and pitch[j] == pitch[i] and not (pitch[j] > 0 and j in attacks and j - i >= settle):
+            j += 1
+        if pitch[i] > 0 and (j - i) * step >= 0.06:  # shorter than 60 ms is a slide or a glitch, not a note
+            level = float(rms[i:j].max()) / loud
+            vel = int(40 + 87 * min(1.0, level ** 0.5))
+            last = notes[-1] if notes else None
+            if last and last[2] == pitch[i] and i * step - last[1] < 0.05 and not any(f in attacks for f in (i - 1, i, i + 1)):
+                notes[-1] = (last[0], j * step, last[2], max(last[3], vel))  # a wobble broke one note in two
+            else:
+                notes.append((i * step, j * step, int(pitch[i]), vel))
+        i = j
+    if notes:
+        write_midi(dest, notes, bpm)
+    return len(notes)
+
+
+def write_midi(path, notes, bpm):
+    """A standard MIDI file (format 0, 480 ticks a beat) with notes as (start s, end s, pitch, velocity)."""
+    ppq = 480
+
+    def ticks(s):
+        return int(round(s * bpm / 60.0 * ppq))
+
+    def vlq(n):
+        out = [n & 0x7F]
+        while n > 0x7F:
+            n >>= 7
+            out.insert(0, (n & 0x7F) | 0x80)
+        return bytes(out)
+
+    events = sorted([(ticks(s), 1, p, v) for s, e, p, v in notes] + [(ticks(e), 0, p, 0) for s, e, p, v in notes])
+    track = bytearray(b"\x00\xff\x51\x03" + int(round(60_000_000 / bpm)).to_bytes(3, "big"))  # tempo
+    last = 0
+    for t, on, p, v in events:  # note-offs sort before note-ons on the same tick
+        track += vlq(t - last) + bytes([0x90 if on else 0x80, p, v if on else 64])
+        last = t
+    track += b"\x00\xff\x2f\x00"  # end of track
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_bytes(b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big")
+                           + ppq.to_bytes(2, "big") + b"MTrk" + len(track).to_bytes(4, "big") + bytes(track))
+
+
 # ---------- preview mixer ----------
 class Mixer:
     """Sums stems in real time. render() runs on the audio thread, everything else on the Tk thread."""
@@ -1396,6 +1615,7 @@ class Engine:
         self.status = ("Ready", "")
         self.gpu = ("Checking GPU", "")
         self.update = None  # (version, release page) once a newer release is found
+        self.grids = {}  # (stem path, bpm) -> bar_starts, for the Loop tab
         self.log_lines = []
 
         # Read once and only write back when the user changes something, so a value edited
@@ -1408,6 +1628,9 @@ class Engine:
             "format": saved.get("format") if saved.get("format") in FORMATS else "WAV",
             "nodrums": bool(saved.get("nodrums", True)),
             "out": saved.get("out") or str(DEFAULT_OUT),
+            # the project the edit panel matches stems to; remembered, so Match is one click after the first time
+            "project_bpm": project_bpm(saved.get("project_bpm")),
+            "project_key": saved.get("project_key") if parse_key(saved.get("project_key")) else None,
         }
 
         threading.Thread(target=self.pump, daemon=True).start()
@@ -1487,10 +1710,14 @@ class Engine:
     # ---------- settings ----------
     def set_setting(self, key, value):
         with self.lock:
-            if key not in self.settings or self.running:
+            if key not in self.settings or self.running and not key.startswith("project_"):
                 return
             if key == "model" and value not in MODELS or key == "quality" and value not in QUALITY \
                     or key == "format" and value not in FORMATS:
+                return
+            if key == "project_bpm":
+                value = project_bpm(value)
+            if key == "project_key" and value is not None and not parse_key(value):
                 return
             self.settings[key] = bool(value) if key == "nodrums" else value
             self.picked.add(key)
@@ -1769,6 +1996,120 @@ class Engine:
             if playable:
                 self.load_token += 1
                 threading.Thread(target=self.load_worker, args=(self.load_token, r["files"]), daemon=True).start()
+
+    def edit_stem(self, index, instr, tool, opts=None):
+        """The edit panel's tools, on one stem of one result. Each writes new files in its own folder beside the
+        stems (Matched, Loops, MIDI); progress and the result go back to the page as 'edit' events.
+          match: a copy at the project's tempo and key ({"bpm", "key"}; remembered for next time)
+          loop:  {"bars"} bars from bar {"start"} on the sample's beat grid, exactly in tempo
+          midi:  the stem's main line as notes"""
+        opts = opts if isinstance(opts, dict) else {}
+        if tool not in ("match", "loop", "midi"):
+            return
+        with self.lock:
+            if not 0 <= index < len(self.results) or instr not in self.results[index]["files"]:
+                return
+            if tool == "match":
+                opts["bpm"], opts["key"] = project_bpm(opts.get("bpm")), opts.get("key") if parse_key(opts.get("key")) else None
+                if (opts["bpm"], opts["key"]) != (self.settings["project_bpm"], self.settings["project_key"]):
+                    self.settings.update(project_bpm=opts["bpm"], project_key=opts["key"])
+                    self.picked.update(("project_bpm", "project_key"))
+                    self.save_settings()
+                    self.emit("settings", dict(self.settings))
+            r = self.results[index]
+            files = r["files"]
+            job = {"tool": tool, "opts": opts, "name": r["name"], "bpm": r.get("bpm"), "key": r.get("key"),
+                   "instr": instr, "src": Path(files[instr]),
+                   "grid": Path(files.get("drums") or files[instr])}  # the beat is clearest in the drums
+        threading.Thread(target=self.edit_worker, args=(job,), daemon=True).start()
+
+    def beat_grid(self, path, bpm):
+        """bar_starts, worked out once per stem (about 2 s) and then reused by the Loop tab."""
+        key = (str(path), bpm)
+        if key not in self.grids:
+            self.grids[key] = bar_starts(path, bpm)
+        return self.grids[key]
+
+    def loop_info(self, index, instr, bars, at=None):
+        """For the Loop tab, before anything is cut: how many bars a loop this long can start on, and the bar
+        playing at `at` seconds (where the player was paused), so the loop starts on what you just heard."""
+        with self.lock:
+            if not 0 <= index < len(self.results) or instr not in self.results[index]["files"]:
+                return None
+            r = self.results[index]
+            bpm, grid_path = r.get("bpm"), Path(r["files"].get("drums") or r["files"][instr])
+        if not bpm or bars not in (1, 2, 4, 8):
+            return None
+        try:
+            grid = self.beat_grid(grid_path, float(primary(bpm)))
+        except Exception as e:
+            file_log(f"Loop grid failed ({e})")
+            return None
+        fits = loop_starts(grid, bars)
+        bar = 1
+        if at:  # the bar the playhead is in, as far as a loop that long can start
+            bar = int(np.searchsorted(grid[0], float(at) + 0.05, side="right")) or 1
+        return {"bar": max(1, min(bar, len(fits))), "total": len(fits)}
+
+    def edit_worker(self, job):
+        tool, instr, src = job["tool"], job["instr"], job["src"]
+
+        def tell(state, **more):
+            self.emit("edit", dict(more, tool=tool, instr=instr, state=state))
+
+        tell("busy")
+        try:
+            done = getattr(self, "edit_" + tool)(job)
+        except EditRefused as e:
+            return tell("error", error=str(e))
+        except Exception as e:
+            self.log_line(f"Couldn't {tool} {src.name} ({e})")
+            return tell("error", error="That didn't work. Open the log for details.")
+        paths = done.pop("paths")
+        self.log_line(f"Edit {tool}: {src.name} -> {paths[0] if len(paths) == 1 else Path(paths[0]).parent}")
+        size = sum(Path(p).stat().st_size for p in paths) / 1_048_576
+        tell("done", paths=paths, size=f"{size:.1f} MB", **done)
+
+    def edit_match(self, job):
+        bpm, key, instr, src = job["bpm"], job["key"], job["instr"], job["src"]
+        want_bpm, want_key = job["opts"]["bpm"], job["opts"]["key"]
+        drums = instr in DRUM_STEMS
+        if not want_bpm and (drums or not want_key):
+            raise EditRefused("Set your project's BPM" + ("." if drums else " or key."))
+        if want_bpm and not bpm:
+            raise EditRefused("This sample's tempo wasn't detected, so it can't be matched to a BPM.")
+        if want_key and not drums and not key:
+            raise EditRefused("This sample's key wasn't detected, so it can't be moved to a key.")
+        ratio = tempo_ratio(bpm, want_bpm) if want_bpm else 1.0
+        semis = 0 if drums or not want_key else key_shift(key, want_key)
+        out_bpm = want_bpm or primary(bpm)
+        out_key = None if drums else (want_key if want_key else primary(key))
+        dest = src.parent / "Matched" / stem_filename(job["name"], instr, src.suffix, out_bpm, out_key)
+        match_audio(src, dest, instr, ratio, semis)
+        return {"paths": [str(dest)], "name": dest.name, "bpm": out_bpm, "key": out_key}
+
+    def edit_loop(self, job):
+        if not job["bpm"]:
+            raise EditRefused("This sample's tempo wasn't detected, so it can't be cut into bars.")
+        bars = job["opts"].get("bars") if job["opts"].get("bars") in (1, 2, 4, 8) else 4
+        start = int(job["opts"].get("start") or 1)
+        src, instr = job["src"], job["instr"]
+        stem = Path(stem_filename(job["name"], instr, "", primary(job["bpm"]), None if instr in DRUM_STEMS else primary(job["key"])))
+        grid = self.beat_grid(job["grid"], float(primary(job["bpm"])))
+        dest, used, total = make_loop(src, grid, bars, start, src.parent / "Loops", stem.name)
+        return {"paths": [str(dest)], "name": dest.name, "bpm": primary(job["bpm"]), "bar": used, "total": total,
+                "key": None if instr in DRUM_STEMS else primary(job["key"])}
+
+    def edit_midi(self, job):
+        instr, src = job["instr"], job["src"]
+        if instr in DRUM_STEMS:
+            raise EditRefused("Drums have no melody to turn into notes.")
+        dest = src.parent / "MIDI" / stem_filename(job["name"], instr, ".mid", primary(job["bpm"]), primary(job["key"]))
+        notes = audio_to_midi(src, dest, instr, float(primary(job["bpm"]) or 120))
+        if not notes:
+            dest.unlink(missing_ok=True)
+            raise EditRefused(f"No clear notes found in the {instr}.")
+        return {"paths": [str(dest)], "name": dest.name, "notes": notes}
 
     def remove_stem(self, index, instr):
         """Take one stem off a result and send its file to the Recycle Bin."""
@@ -2172,13 +2513,7 @@ class Engine:
             saved = {}
             for instr, data in final.items():
                 path = dest / stem_filename(base, instr, ext, bpm, key)
-                if mp3:
-                    sf.write(path, np.clip(data, -1.0, 1.0), sr, format="MP3",
-                             bitrate_mode="CONSTANT", compression_level=0.0)  # 320 kbps
-                elif flac:  # FLAC has no float format, so clip and store as 24-bit
-                    sf.write(path, np.clip(data, -1.0, 1.0), sr, format="FLAC", subtype="PCM_24")
-                else:
-                    sf.write(path, data, sr, subtype="FLOAT")
+                save_audio(path, data, sr)
                 saved[instr] = str(path)
             results.append({"name": base, "tag": tag_text(bpm, key, sep="  ·  "), "bpm": bpm, "key": key,
                             "files": dict(sorted(saved.items(), key=lambda kv: stem_sort_key(kv[0])))})
@@ -2260,6 +2595,12 @@ class Api:
 
     def set_setting(self, key, value):
         self._engine.set_setting(key, value)
+
+    def edit_stem(self, index, instr, tool, opts=None):
+        self._engine.edit_stem(index, instr, tool, opts)
+
+    def loop_info(self, index, instr, bars, at=None):
+        return self._engine.loop_info(index, instr, bars, at)
 
     def pick_files(self):
         w = self._bridge.window

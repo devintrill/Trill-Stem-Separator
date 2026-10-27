@@ -27,6 +27,12 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 - **Drag stems into FL Studio** (or any DAW) directly from the result list.
 - **Output as 32-bit float WAV or 320 kbps MP3**, with clear file names.
 - **Optional "no drums" mix** for models that produce a drum stem.
+- **Edit a stem** with the pencil that appears when you hover it:
+  - **Match** makes a copy at your project's BPM and key (Rubber Band; drums keep their pitch, vocals keep their tone).
+  - **Loop** cuts 1, 2, 4 or 8 bars from any bar, on the sample's own beat grid, exactly in tempo.
+  - **MIDI** turns the stem's main line into notes, which works best on bass and lead vocals.
+
+  Everything it makes drags straight into your DAW and is saved next to the stems, in `Matched`, `Loops` and `MIDI`.
 - **Live log and progress bar**, plus a log file on disk for troubleshooting.
 - **One-click setup**: SampleSmith.exe installs everything on first run and repairs anything that goes missing.
 
