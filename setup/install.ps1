@@ -76,23 +76,28 @@ function Run($what) {
     if ($LASTEXITCODE -ne 0) { Fail "Setup failed while $($what.ToString().Trim())" }
 }
 
-# Installs PyTorch with a live byte count: uv works out the files (a pylock.toml), wheels.py downloads them
-# printing progress, and uv installs those files. If any of that fails, uv downloads them itself, just
-# without the count.
-function InstallTorch($reqs, $index) {
-    $in = Join-Path $Temp 'torch.in'
-    $lock = Join-Path $Temp 'pylock.torch.toml'   # uv only writes pylock.*.toml names
+# Installs packages with a live byte count: uv works out the files of the requirements file $in (a
+# pylock.toml), wheels.py downloads them printing progress, and uv installs those files plus $install.
+# $compile is extra uv arguments for working out the files. If any of that fails, uv downloads them itself,
+# just without the count.
+function InstallCounted($in, $compile, $install) {
+    $lock = Join-Path $Temp 'pylock.setup.toml'   # uv only writes pylock.*.toml names
     $wheels = Join-Path $Temp 'wheels'
     Remove-Item -Recurse -Force $wheels -ErrorAction SilentlyContinue
-    Set-Content -Path $in -Value $reqs -Encoding Ascii
     $files = @()
-    & $Uv pip compile --quiet --python $Py $in @index --format pylock.toml -o $lock
+    & $Uv pip compile --quiet --python $Py $in @compile --format pylock.toml -o $lock
     if ($LASTEXITCODE -eq 0) {
         & $Py -I (Join-Path $PSScriptRoot 'wheels.py') $lock $wheels
         if ($LASTEXITCODE -eq 0) { $files = @(Get-ChildItem $wheels -Filter *.whl | ForEach-Object FullName) }
     }
-    Run { & $Uv pip install --python $Py @files @reqs @index --reinstall-package torch --reinstall-package torchaudio }
+    Run { & $Uv pip install --python $Py @files @install }
     Remove-Item -Recurse -Force $wheels -ErrorAction SilentlyContinue
+}
+
+function InstallTorch($reqs, $index) {
+    $in = Join-Path $Temp 'torch.in'
+    Set-Content -Path $in -Value $reqs -Encoding Ascii
+    InstallCounted $in $index (@($reqs) + @($index) + @('--reinstall-package', 'torch', '--reinstall-package', 'torchaudio'))
 }
 
 function PyOk($code) {
@@ -198,7 +203,11 @@ Say '  OK'
 
 # 6. Everything else.
 Step 6 'Installing the app packages'
-Run { & $Uv pip install --python $Py -r (Join-Path $PSScriptRoot 'requirements.txt') }
+# Pinned to the PyTorch from step 5 and not downloaded again, so this can't swap it for another build.
+$Reqs = Join-Path $PSScriptRoot 'requirements.txt'
+$pins = Join-Path $Temp 'torch-pins.txt'
+& $Py -c 'import importlib.metadata as m; [print(p + chr(61)*2 + m.version(p).split(chr(43))[0]) for p in (''torch'', ''torchaudio'')]' 2>$null | Set-Content -Path $pins -Encoding Ascii
+InstallCounted $Reqs @('--constraint', $pins, '--no-emit-package', 'torch', '--no-emit-package', 'torchaudio') @('-r', $Reqs)
 Run { & $Uv pip install --python $Py --no-deps demucs==4.0.0 "skey @ $SkeyUrl" }
 Say '  OK'
 

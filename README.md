@@ -51,6 +51,8 @@ SampleSmith is a front end for [Music-Source-Separation-Training](https://github
 
 ## Installation
 
+**Download:** [SampleSmith.zip](https://github.com/devintrill/Trill-Stem-Separator/releases/latest/download/SampleSmith.zip) (no git needed).
+
 1. Download SampleSmith and unzip it anywhere (for example your Desktop or Documents).
 2. Double-click **SampleSmith.exe**. If Windows SmartScreen appears, choose *More info* > *Run anyway*.
 3. The first time, a setup window installs everything SampleSmith needs into the `runtime` folder next to it: Python 3.11, the PyTorch build for your graphics card (CUDA for NVIDIA, DirectML for AMD and Intel, processor-only otherwise), the MSST separation engine, Node.js and the detection models. It downloads about 4 GB with an NVIDIA card and about 2 GB otherwise, then opens the app and adds Desktop and Start menu shortcuts.

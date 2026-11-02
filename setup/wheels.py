@@ -1,5 +1,6 @@
-# Downloads the wheels of a uv pylock.toml with a live byte count, so setup can show the PyTorch download
-# moving (uv draws no progress when it isn't in a terminal). install.ps1 then hands the files to uv.
+# Downloads the wheels of a uv pylock.toml with a live byte count, so setup can show the PyTorch and app
+# package downloads moving (uv draws no progress when it isn't in a terminal). install.ps1 then hands the
+# files to uv. Wheels already installed at the same version are skipped.
 # Usage: python wheels.py <pylock.toml> <folder>. Prints "@@pct <0..1>" for the setup window's bar and an
 # indented "42%  1.10 of 2.60 GB" line for the step's note (ASCII: PowerShell passes it on in the console
 # code page). Only the standard library: torch isn't in yet.
@@ -10,6 +11,7 @@ import tomllib
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from importlib import metadata
 from pathlib import Path
 
 
@@ -37,6 +39,11 @@ def main(lock, out):
     out.mkdir(parents=True, exist_ok=True)
     files = []
     for pkg in tomllib.loads(lock.read_text(encoding="utf-8")).get("packages", []):
+        try:  # already installed at that version (setup run again): nothing to download
+            if metadata.version(pkg["name"]) == pkg.get("version"):
+                continue
+        except Exception:
+            pass
         w = pick(pkg.get("wheels", []))
         if w:  # a package with no fitting wheel is left to uv
             files.append(w)
