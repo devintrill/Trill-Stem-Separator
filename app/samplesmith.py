@@ -1185,6 +1185,85 @@ class Mixer:
         return out
 
 
+class Audition:
+    """Plays one file the edit panel made (a matched copy, a loop) so it can be heard before it's dragged out.
+    A loop goes round until stopped; anything else plays once. It has its own output stream, next to the
+    stems' one. Sends 'audition' with the playing path, or None once it stops."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.lock = threading.Lock()
+        self.stream = None
+        self.path = None
+
+    def toggle(self, path, loop):
+        """Play path; if it's what's playing already, stop it instead."""
+        with self.lock:
+            same = self.stream is not None and self.path == path
+        self.stop()
+        if not same:
+            threading.Thread(target=self._start, args=(path, bool(loop)), daemon=True).start()
+
+    def _start(self, path, loop):
+        import sounddevice as sd
+        import soundfile as sf
+        try:
+            data, sr = sf.read(path, dtype="float32", always_2d=True)
+        except Exception as e:
+            file_log(f"Audition couldn't read {path} ({e})")
+            return self.emit("audition", {"path": None})
+        data = np.repeat(data, 2, axis=1) if data.shape[1] == 1 else np.ascontiguousarray(data[:, :2])
+        if not len(data):
+            return self.emit("audition", {"path": None})
+        pos = 0
+
+        def fill(out, frames, _time, _status):
+            nonlocal pos
+            n = 0
+            while n < frames:
+                take = min(frames - n, len(data) - pos)
+                if take <= 0:
+                    if not loop:
+                        out[n:] = 0
+                        raise sd.CallbackStop
+                    pos = 0  # round again, sample-exact
+                    continue
+                out[n:n + take] = data[pos:pos + take]
+                pos += take
+                n += take
+
+        def finished():  # played to the end (not stopped from here): tell the page
+            with self.lock:
+                mine = self.stream is stream
+                if mine:
+                    self.stream, self.path = None, None
+            if mine:
+                self.emit("audition", {"path": None})
+
+        try:
+            stream = sd.OutputStream(samplerate=sr, channels=2, dtype="float32", callback=fill, finished_callback=finished)
+            with self.lock:
+                self.stream, self.path = stream, path
+            stream.start()
+        except Exception as e:
+            file_log(f"Audition couldn't open audio ({e})")
+            with self.lock:
+                self.stream, self.path = None, None
+            return self.emit("audition", {"path": None})
+        self.emit("audition", {"path": path})
+
+    def stop(self):
+        with self.lock:
+            stream, self.stream, self.path = self.stream, None, None
+        if stream is not None:
+            try:
+                stream.abort()
+                stream.close()
+            except Exception:
+                pass
+            self.emit("audition", {"path": None})
+
+
 class Player:
     """Owns the sounddevice output stream that pulls audio from a Mixer."""
 
@@ -1259,6 +1338,16 @@ def stem_peaks(data, bars=96):
     peaks = mono.reshape(data.shape[0], bars, -1).max(axis=2)
     peaks = np.sqrt(peaks / max(float(peaks.max()), 1e-6))  # sqrt so quieter detail still shows
     return [[round(float(v), 3) for v in row] for row in peaks]
+
+
+def stem_silent(data, floor_db=-40.0):
+    """Which stems are next to silent: 40 dB or more below the loudest one. A model always writes every stem,
+    so a loop with no vocals still gets a Vocals file; those measure around -90 dB, while even a soft part that's
+    really there sits within about 30 dB of the loudest."""
+    # sum of squares per stem without a squared copy of the whole array (several hundred MB for a full song)
+    rms = np.sqrt(np.einsum("ijk,ijk->i", data, data) / max(data.shape[1] * data.shape[2], 1))
+    top = max(float(rms.max()), 1e-9)
+    return [bool(20 * np.log10(max(float(r), 1e-12) / top) < floor_db) for r in rms]
 
 
 # ---------- YouTube ----------
@@ -1604,6 +1693,9 @@ class Engine:
         self.selected = 0
         self.mixer = Mixer()
         self.player = Player(self.mixer, self.q)
+        self.audition = Audition(emit)  # the edit panel's play key
+        self.run_label = None  # see run_state
+        self.made = set()  # files the edit panel wrote: the only ones it may play
         self.load_token = 0
         self.player_state = None
         self.yt_busy = False
@@ -1678,7 +1770,8 @@ class Engine:
         return rows
 
     def run_state(self):
-        return {"running": self.running, "started": self.started_at * 1000}
+        # label: what the Separate key says while a split runs ("Downloading" the first time a model is used)
+        return {"running": self.running, "started": self.started_at * 1000, "label": self.run_label}
 
     def yt_state(self):
         return {"busy": self.yt_busy}
@@ -1828,6 +1921,9 @@ class Engine:
                                 self.set_status(value, "warn")
                         elif kind == "progress":
                             progress = value
+                        elif kind == "run_label":
+                            self.run_label = value
+                            self.emit("run", self.run_state())
                         elif kind == "error":
                             status = None  # don't let an older status in this batch hide the error
                             self.log_line("ERROR: " + value)
@@ -1855,6 +1951,7 @@ class Engine:
                             if status is not None:
                                 self.set_status(status)
                             status = progress = None
+                            self.run_label = None  # a download that failed or was stopped doesn't carry over
                             self.finish(value)
                     kind, value = self.q.get_nowait()
             except queue.Empty:
@@ -1976,6 +2073,7 @@ class Engine:
     def shutdown(self):
         self.stop()
         self.warm.kill()
+        self.audition.stop()
         self.player.close()
 
     # ---------- stems / preview ----------
@@ -2066,6 +2164,7 @@ class Engine:
             self.log_line(f"Couldn't {tool} {src.name} ({e})")
             return tell("error", error="That didn't work. Open the log for details.")
         paths = done.pop("paths")
+        self.made.update(paths)
         self.log_line(f"Edit {tool}: {src.name} -> {paths[0] if len(paths) == 1 else Path(paths[0]).parent}")
         size = sum(Path(p).stat().st_size for p in paths) / 1_048_576
         tell("done", paths=paths, size=f"{size:.1f} MB", **done)
@@ -2141,10 +2240,10 @@ class Engine:
             self.q.put(("log", f"Couldn't load stems for preview ({e})."))
             return
         try:
-            peaks = stem_peaks(data)
+            peaks = {"peaks": stem_peaks(data), "silent": stem_silent(data)}
         except Exception as e:  # waveforms are a nicety; preview still works without them
             file_log(f"Waveforms failed: {e}")
-            peaks = []
+            peaks = None
         self.q.put(("mixer_ready", (token, names, data, sr, peaks)))
 
     def on_mixer_ready(self, token, names, data, sr, peaks):
@@ -2153,7 +2252,7 @@ class Engine:
         self.mixer.load(names, data, sr)
         self.update_player(force=True)
         if peaks:
-            self.emit("peaks", {"names": names, "peaks": peaks})
+            self.emit("peaks", dict(peaks, names=names))
 
     def toggle_strip(self, which, name):
         with self.lock:
@@ -2165,8 +2264,19 @@ class Engine:
             if self.mixer.playing:
                 self.mixer.stop()
             else:
+                self.audition.stop()  # one thing plays at a time
                 self.player.play()
             self.update_player(force=True)
+
+    def audition_file(self, path, loop=False):
+        """Edit panel's play key: hear what it made. Only files it made can be played, and the stems pause."""
+        if str(path) not in self.made:
+            return
+        with self.lock:
+            if self.mixer.playing:
+                self.mixer.stop()
+                self.update_player(force=True)
+        self.audition.toggle(str(path), loop)
 
     def seek(self, frac):
         with self.lock:
@@ -2263,14 +2373,19 @@ class Engine:
         if not self.running:
             self.set_status("Ready")
 
-    def download(self, url, dest):
+    def download(self, url, dest, model="", done=0, total=0):
+        """One file of a model. Weight files (done of total so far) move one overall bar for the whole model;
+        a config is a few KB and just downloads."""
         if dest.exists() and dest.stat().st_size > 0:
             return
         self.q.put(("log", f"Downloading {dest.parent.name}/{dest.name} (first time only)..."))
 
         def progress(pct):
-            self.q.put(("progress", pct))
-            self.q.put(("status", f"Downloading {dest.parent.name} model: {pct * 100:.0f}%"))
+            if not total:
+                return
+            overall = (done + pct) / total
+            self.q.put(("progress", overall))
+            self.q.put(("status", f"Downloading {model}, first time only · {overall * 100:.0f}%"))
 
         try:
             fetch(url, dest, progress, lambda: self.stop_flag)
@@ -2290,8 +2405,18 @@ class Engine:
             parts = s["model"]["parts"]
             for p in parts:
                 p["_config"], p["_weights"] = part_files(p)
+            # a model's first use downloads it (HTDemucs FT is four weight files): one bar for all of them,
+            # and the Separate key says so
+            need = [p for p in parts if not (p["_weights"].exists() and p["_weights"].stat().st_size > 0)]
+            if need:
+                self.q.put(("run_label", "Downloading"))
+            for p in parts:
                 self.download(p["config"], p["_config"])
-                self.download(p["weights"], p["_weights"])
+            for i, p in enumerate(need):
+                self.download(p["weights"], p["_weights"], s["model_name"], i, len(need))
+            if need:
+                self.q.put(("run_label", None))
+                self.q.put(("progress", 0.0))
 
             tmp_in = work / "in"
             tmp_in.mkdir()
@@ -2660,6 +2785,12 @@ class Api:
 
     def toggle_play(self):
         self._engine.toggle_play()
+
+    def audition(self, path, loop=False):
+        self._engine.audition_file(path, loop)
+
+    def audition_stop(self):
+        self._engine.audition.stop()
 
     def seek(self, frac):
         self._engine.seek(frac)

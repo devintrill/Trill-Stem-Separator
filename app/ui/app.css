@@ -1227,12 +1227,29 @@ body.locked .pill.good i { background: var(--pad-lit); }
 /* pad layout: name across the top, S/M and the waveform side by side underneath, so names never get cut off,
    and seven pads fit one row at the default window size */
 .strips { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
-.strip:not(.pending) { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "nm nm" "sm wave"; align-items: center; }
+.strip:not(.pending) { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "nm sm" "wave sm"; align-items: center; column-gap: 8px; }
 .strip:not(.pending) .top { display: contents; }
 .strip:not(.pending) .nm { grid-area: nm; }
 .strip:not(.pending) .sm-row { grid-area: sm; }
 .strip:not(.pending) .sm-row.blank { width: 0; }
 .strip:not(.pending) .wave { grid-area: wave; }
+/* S over M down the pad's right edge, like a mixer channel: the name keeps its row even six pads across,
+   and the waveform runs the rest of the width beside them */
+.strip:not(.pending) .sm-row { flex-direction: column; gap: 5px; align-self: center; }
+.strip:not(.pending) .sm-row .sw { width: 30px; height: 28px; }
+/* a stem with next to nothing in it: the pad stays (it's still a file) but dims, so it reads as empty at a glance */
+.strip.hush .nm .label { color: var(--muted-dim); }
+.strip.hush .grip svg { fill: #6b6b75; }
+.strip.hush .wave { opacity: 0.3; }
+
+/* play key on an edit's result row: hear it before you drag it */
+.file .aud { width: 32px; height: 32px; flex: none; border-radius: 10px; display: grid; place-items: center; color: var(--foreground);
+  background: linear-gradient(180deg, #3a3a46, #30303c); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 2px 0 #121218; }
+.file .aud:hover { color: var(--pad-lit); }
+.file .aud svg { width: 14px; height: 14px; fill: currentColor; }
+.file .aud .i-stop, .file .aud.playing .i-play { display: none; }
+.file .aud.playing .i-stop { display: inline; }
+.file .aud.playing { color: #141209; background: linear-gradient(180deg, #f6d261, #efc23a); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45), 0 2px 0 #8f7420; }
 /* a tall stems card must never squeeze the Quality and Format switches */
 .seg { flex: none; }
 /* quality/format slider in the key material: the track is a sunken well, the thumb a raised key.

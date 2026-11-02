@@ -204,6 +204,7 @@
   function setRun(run) {
     if (S.running && !run.running) S.finishedBy = $('go');  // the "Done!" that follows pops out of Separate
     S.running = run.running;
+    S.runLabel = run.label || null;
     if (run.started) S.started = run.started;
     document.body.classList.toggle('locked', S.running);
     $('bar').parentElement.classList.toggle('running', S.running);
@@ -217,7 +218,7 @@
   function renderGo() {
     const go = $('go'), idle = !S.running && !S.hasFiles;
     go.disabled = S.running || idle;
-    go.textContent = S.running ? 'Working' : 'Separate';
+    go.textContent = S.running ? (S.runLabel || 'Working') : 'Separate';
     go.classList.toggle('working', S.running);
     go.classList.toggle('idle', idle);
   }
@@ -347,11 +348,16 @@
     edBars.set(Object.keys(BARS).find((k) => BARS[k] === ED.bars));
     setTool(ED.tool);
   }
-  function closeEditor() { $('editor').hidden = true; ED.instr = null; }
+  function closeEditor() { $('editor').hidden = true; ED.instr = null; call('audition_stop'); }
+  // the play key on whatever is auditioning shows stop; everything else shows play
+  function showAudition(v) {
+    document.querySelectorAll('.aud').forEach((b) => b.classList.toggle('playing', !!v.path && b.dataset.path === v.path));
+  }
   function setTool(tool) {
     ED.tool = tool;
     edTabs.set(Object.keys(TOOLS).find((k) => TOOLS[k] === tool));
     for (const t of document.querySelectorAll('.ed-tool')) t.hidden = t.dataset.tool !== tool;
+    if ($('ed-out').querySelector('.aud.playing')) call('audition_stop');
     $('ed-out').replaceChildren();
     $('ed-go').disabled = false; $('ed-go').textContent = ACTION[tool];
     renderEditor();
@@ -437,12 +443,21 @@
     if (v.state === 'error') out.replaceChildren(el('div', 'ed-note', v.error));
     if (v.state !== 'done') return;
     if (v.tool === 'loop') { ED.start = v.bar; ED.total = v.total; renderEditor(); }
-    // what it made, as a sample row: drag it into the DAW, double-click to show the file
+    // what it made, as a sample row: play it first (a loop goes round), drag it into the DAW, double-click to show it
     const row = el('div', 'file'), grip = el('span', 'grip'), tags = el('span', 'tags');
     grip.append(svg(ICON_GRIP));
     if (v.tool === 'midi') tags.append(el('span', 'badge none', `${v.notes} notes`));
     else fillTags(tags, { bpm: v.bpm, key: v.key, done: true });
-    row.append(grip, el('span', 'name', v.name), tags, el('span', 'size', v.size));
+    row.append(grip);
+    if (v.tool !== 'midi') {
+      const aud = el('button', 'aud'); aud.dataset.path = v.paths[0];
+      aud.append(svg('<path class="i-play" d="M8 5.5v13l11-6.5z"/><rect class="i-stop" x="6.5" y="6.5" width="11" height="11" rx="2"/>'));
+      aud.title = v.tool === 'loop' ? 'Play the loop (it goes round until you stop it)' : 'Play it';
+      aud.addEventListener('click', (e) => { e.stopPropagation(); call('audition', v.paths[0], v.tool === 'loop'); });
+      aud.addEventListener('pointerdown', (e) => e.stopPropagation());
+      row.append(aud);
+    }
+    row.append(el('span', 'name', v.name), tags, el('span', 'size', v.size));
     row.title = 'Drag into your DAW · double-click to show ' + (v.paths.length > 1 ? 'the files' : 'the file');
     dragOut(row, () => v.paths);
     row.addEventListener('dblclick', () => call('open_folder_of', v.paths[0]));
@@ -491,12 +506,19 @@
   }
 
   /* ---------- stem waveforms: a band under each pad's name row, lit up to the playhead ---------- */
-  let waves = { of: null, names: [], peaks: [] };
-  function setPeaks(v) { waves = { of: waves.of, names: v.names, peaks: v.peaks }; drawWaves(); }
+  // silent: stems with next to nothing in them (a loop with no vocals still gets a Vocals file); their pads dim
+  let waves = { of: null, names: [], peaks: [], silent: [] };
+  function setPeaks(v) { waves = { of: waves.of, names: v.names, peaks: v.peaks, silent: v.silent || [] }; drawWaves(); }
   function drawWaves() {
     document.querySelectorAll('.strip').forEach((s) => {
       s.querySelector('.wave')?.remove();
       const i = waves.names.indexOf(s.dataset.name);
+      const hush = i >= 0 && !!waves.silent[i];
+      if (s.classList.contains('hush') !== hush) {
+        s.classList.toggle('hush', hush);
+        s.title = hush ? 'Almost silent in this sample · drag into your DAW · double-click to show the file'
+                       : 'Drag into your DAW · double-click to show the file';
+      }
       if (i < 0) return;
       const wave = el('div', 'wave'), lit = el('div', 'wave-lit');
       const base = document.createElement('canvas'), top = document.createElement('canvas');
@@ -723,6 +745,7 @@
     peaks: setPeaks,
     drag_native() { if (ghost) ghost.classList.add('native'); },
     edit: showEdit,
+    audition: showAudition,
     // a newer release is out: a small lit pill by the GPU one, which opens its download page
     update(u) {
       const b = $('update');
