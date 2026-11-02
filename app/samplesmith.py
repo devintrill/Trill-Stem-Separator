@@ -120,7 +120,7 @@ MODELS = {
         "parts": HTDEMUCS_FT,
     },
 }
-DEFAULT_MODEL = "BS-RoFormer SW"  # what a new install starts on; setup downloads it (get_default_model)
+DEFAULT_MODEL = "BS-RoFormer SW"  # what a new install starts on; setup downloads it and HTDemucs FT (get_models)
 
 # Quality presets: overlap = MSST num_overlap (each sample is processed this many times;
 # 2 is about what UVR does), TTA = also process flipped/inverted copies and average (3x time),
@@ -1642,24 +1642,34 @@ def fetch(url, dest, progress=None, stopped=lambda: False):
     tmp.replace(dest)
 
 
-def get_default_model():
-    """Setup runs this (samplesmith.py --get-default-model) so the first split starts right away instead of
-    with a ~700 MB download. Progress lines are indented, which the setup window shows next to its step."""
-    parts = MODELS[DEFAULT_MODEL]["parts"]
-    files = [(url, dest) for p in parts for url, dest in zip((p["config"], p["weights"]), part_files(p))]
-    shown = -1
-    for i, (url, dest) in enumerate(files):
-        if dest.exists() and dest.stat().st_size > 0:
-            continue
+def get_models():
+    """Setup runs this (samplesmith.py --get-models) so no split starts with a download: BS-RoFormer SW and
+    HTDemucs FT, about 1 GB. Prints "@@pct" for the setup window's bar and indented "42%  420 of 1010 MB"
+    lines, which it shows next to its step."""
+    files = [(url, dest) for name in ("BS-RoFormer SW", "HTDemucs FT") for p in MODELS[name]["parts"]
+             for url, dest in zip((p["config"], p["weights"]), part_files(p))
+             if not (dest.exists() and dest.stat().st_size > 0)]
 
-        def progress(f, i=i):
+    def size(url):
+        req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return int(resp.headers.get("Content-Length") or 0)
+
+    sizes = [size(url) for url, _ in files]
+    total = max(1, sum(sizes)) / 1e6
+    shown, done = "", 0.0
+    for (url, dest), n in zip(files, sizes):
+        def progress(f, n=n):
             nonlocal shown
-            pct = int((i + f) / len(files) * 100)
-            if pct != shown:
-                shown = pct
-                print(f"  {DEFAULT_MODEL} model: {pct}%", flush=True)
+            got = done + f * n / 1e6
+            note = f"  {int(got / total * 100)}%  {got:.0f} of {total:.0f} MB"
+            if note != shown:
+                shown = note
+                print(f"@@pct {got / total:.4f}", flush=True)
+                print(note, flush=True)
 
         fetch(url, dest, progress)
+        done += n / 1e6
     print("  OK", flush=True)
 
 
@@ -3086,11 +3096,11 @@ def hide_console():
 
 
 if __name__ == "__main__":
-    if "--get-default-model" in sys.argv:  # setup, step 7
+    if "--get-models" in sys.argv:  # setup, step 7
         try:
-            get_default_model()
+            get_models()
         except Exception as e:
-            print(f"Couldn't download the model ({e})", flush=True)
+            print(f"Couldn't download the models ({e})", flush=True)
             sys.exit(1)
         sys.exit(0)
     hide_console()

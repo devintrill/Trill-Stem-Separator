@@ -76,6 +76,25 @@ function Run($what) {
     if ($LASTEXITCODE -ne 0) { Fail "Setup failed while $($what.ToString().Trim())" }
 }
 
+# Installs PyTorch with a live byte count: uv works out the files (a pylock.toml), wheels.py downloads them
+# printing progress, and uv installs those files. If any of that fails, uv downloads them itself, just
+# without the count.
+function InstallTorch($reqs, $index) {
+    $in = Join-Path $Temp 'torch.in'
+    $lock = Join-Path $Temp 'pylock.torch.toml'   # uv only writes pylock.*.toml names
+    $wheels = Join-Path $Temp 'wheels'
+    Remove-Item -Recurse -Force $wheels -ErrorAction SilentlyContinue
+    Set-Content -Path $in -Value $reqs -Encoding Ascii
+    $files = @()
+    & $Uv pip compile --quiet --python $Py $in @index --format pylock.toml -o $lock
+    if ($LASTEXITCODE -eq 0) {
+        & $Py -I (Join-Path $PSScriptRoot 'wheels.py') $lock $wheels
+        if ($LASTEXITCODE -eq 0) { $files = @(Get-ChildItem $wheels -Filter *.whl | ForEach-Object FullName) }
+    }
+    Run { & $Uv pip install --python $Py @files @reqs @index --reinstall-package torch --reinstall-package torchaudio }
+    Remove-Item -Recurse -Force $wheels -ErrorAction SilentlyContinue
+}
+
 function PyOk($code) {
     if (-not (Test-Path $Py)) { return $false }
     & $Py -c $code 2>$null | Out-Null
@@ -163,17 +182,17 @@ if ($Gpu -eq 'nvidia') {
     if (-not (PyOk 'import torch, sys; sys.exit(0 if torch.version.cuda else 1)')) {
         Say '  About 2.5 GB'
         & $Uv pip uninstall --python $Py torch-directml 2>$null | Out-Null
-        Run { & $Uv pip install --python $Py torch torchaudio --index-url $TorchIndex --reinstall-package torch --reinstall-package torchaudio }
+        InstallTorch @('torch', 'torchaudio') @('--index-url', $TorchIndex)
     }
 } elseif ($Gpu -eq 'directml') {
     # torch-directml pins its PyTorch (2.4.1); torchaudio has to match it
     if (-not (PyOk 'import torch_directml')) {
         Say '  About 300 MB'   # PyTorch for the processor, DirectML and torchvision
-        Run { & $Uv pip install --python $Py torch-directml torchaudio==2.4.1 --reinstall-package torch --reinstall-package torchaudio }
+        InstallTorch @('torch-directml', 'torchaudio==2.4.1') @()
     }
 } elseif (-not (PyOk 'import torch')) {
     Say '  About 300 MB'
-    Run { & $Uv pip install --python $Py torch torchaudio --index-url 'https://download.pytorch.org/whl/cpu' }
+    InstallTorch @('torch', 'torchaudio') @('--index-url', 'https://download.pytorch.org/whl/cpu')
 }
 Say '  OK'
 
@@ -183,7 +202,7 @@ Run { & $Uv pip install --python $Py -r (Join-Path $PSScriptRoot 'requirements.t
 Run { & $Uv pip install --python $Py --no-deps demucs==4.0.0 "skey @ $SkeyUrl" }
 Say '  OK'
 
-# 7. MSST, the separation engine. Models it needs download the first time each one is used.
+# 7. MSST, the separation engine, and the files of both models.
 Step 7 'Getting the separation engine'
 $Engine = Join-Path $Runtime 'engine'
 if (-not (Test-Path (Join-Path $Engine 'inference.py'))) {
@@ -202,10 +221,10 @@ if (-not (Test-Path $Models) -and (Test-Path $OldModels)) {
     # weights only: /S skips folders left empty once the old install's code files are excluded
     robocopy $OldModels $Models /S /XF *.py *.pyc /NFL /NDL /NJH /NJS /NP | Out-Null
 }
-# The default model (about 700 MB), so the first split starts right away. Its progress lines show next to
-# this step. If it can't download now, the app fetches it on the first split instead, so setup carries on.
-& $Py (Join-Path $Root 'app\samplesmith.py') --get-default-model
-if ($LASTEXITCODE -ne 0) { Say '  The model will download on your first split instead.' Yellow }
+# BS-RoFormer SW and HTDemucs FT (about 1 GB), so no split has to download first. Their progress lines show
+# next to this step. If they can't download now, the app fetches them on first use, so setup carries on.
+& $Py (Join-Path $Root 'app\samplesmith.py') --get-models
+if ($LASTEXITCODE -ne 0) { Say '  The models will download the first time you use them instead.' Yellow }
 
 # 8. Node.js runs Essentia's key detection (and helps YouTube downloads).
 Step 8 'Setting up key detection'

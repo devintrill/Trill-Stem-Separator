@@ -112,6 +112,7 @@ class SetupWindow : Form
     readonly Key cancelKey, detailsKey, retryKey;
     Process proc;
     int step, frame;
+    float within;  // how far the current step's download is (install.ps1's "@@pct" lines), 0 to 1
     bool failed, done, stopping;
     string failMsg, lastText;
     string size = "2 to 4 GB";  // until install.ps1 has found the graphics card
@@ -197,6 +198,7 @@ class SetupWindow : Form
         failed = done = stopping = false;
         failMsg = lastText = null;
         step = 0;
+        within = 0;
         for (int i = 0; i < notes.Length; i++) notes[i] = null;
         log.Length = 0;
         details.Text = "";
@@ -237,15 +239,24 @@ class SetupWindow : Form
 
     void OnLine(string line)
     {
+        string t = line.Trim();
+        if (t.StartsWith("@@pct "))  // several a second while downloading, so not logged
+        {
+            float f;
+            if (float.TryParse(t.Substring(6), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f))
+                within = Math.Max(0f, Math.Min(1f, f));
+            Invalidate();
+            return;
+        }
         Log(line);
         var m = Regex.Match(line, @"^\[(\d)/9\]\s*(.*)$");
         if (m.Success)
         {
             step = int.Parse(m.Groups[1].Value);
+            within = 0;
             Invalidate();
             return;
         }
-        string t = line.Trim();
         if (t.Length == 0) return;
         if (t.StartsWith("@@size "))
         {
@@ -420,7 +431,8 @@ class SetupWindow : Form
             Write(g, done ? "" : "Step " + Math.Max(step, 1) + " of 9", f, C(0x85858f), R(312, 184, 200, 20), StringAlignment.Far);
         }
         Fill(g, R(48, 208, 464, 8), 4, C(0x0a0a10));
-        float part = done ? 1f : Math.Max(0.02f, (Math.Max(step, 1) - 0.5f) / 9f);
+        // a step that's working shows a sliver of itself, and a step that downloads fills as the bytes come in
+        float part = done ? 1f : Math.Max(0.02f, (Math.Max(step, 1) - 1 + Math.Max(0.15f, within)) / 9f);
         var bar = R(48, 208, 464 * part, 8);
         using (var p = Round(bar, 4 * s))
         using (var b = new LinearGradientBrush(new RectangleF(bar.X, bar.Y, Math.Max(1, bar.Width), bar.Height),
