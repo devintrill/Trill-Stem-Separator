@@ -870,6 +870,32 @@ def stem_sort_key(instr):
     return (STEM_ORDER.index(instr) if instr in STEM_ORDER else len(STEM_ORDER) - 1, instr)
 
 
+TRAILING_PATH = re.compile(r"[A-Za-z]:\\[^\n]*$")
+# the engine's own housekeeping: its progress bars (with terminal escape codes), file counts and timers
+ENGINE_CHATTER = re.compile(r"\x1b|^\W*\[A|it/s\]|^(Total files found|Processing audio chunks|Elapsed time|Instruments:|"
+                            r"Start from checkpoint|Model load time|Using device|CUDA is available)")
+
+
+def readable(line):
+    """The log window's copy of a line: step timings and the engine's chatter stay in the log file only, and a
+    full path at the end of a line shrinks to its last two parts, so the window reads as what happened rather
+    than where on disk."""
+    if line.startswith(("Step: ", "Timing: ")) or ENGINE_CHATTER.search(line):
+        return None
+
+    def short(m):
+        path = m.group(0).rstrip(").")
+        parts = Path(path).parts
+        return ("…\\" + "\\".join(parts[-2:]) if len(parts) > 2 else path) + m.group(0)[len(path):]
+
+    return TRAILING_PATH.sub(short, line).replace(" -> ", " → ")
+
+
+def size_text(n):
+    """'6.7 MB', or '3 KB' for small files like MIDI (which showed as '0.0 MB')."""
+    return f"{n / 1_048_576:.1f} MB" if n >= 1_000_000 else f"{max(1, round(n / 1024))} KB"
+
+
 def fmt_time(seconds):
     s = int(max(0, seconds))
     return f"{s // 60}:{s % 60:02d}"
@@ -1771,7 +1797,7 @@ class Engine:
         for f in self.files:
             p = Path(f)
             try:
-                size = f"{p.stat().st_size / 1_048_576:.1f} MB"
+                size = size_text(p.stat().st_size)
             except OSError:
                 size = ""
             bpm, key = self.info.get(f, (None, None))
@@ -1799,13 +1825,19 @@ class Engine:
 
     def send_files(self):
         self.emit("files", self.file_rows())
+        if not self.running and len(self.status) > 2 and self.status[2]:
+            self.set_status("Ready")  # "6 stems saved" is about samples that have since changed
 
-    def set_status(self, text, tone=""):
-        self.status = (text, tone)
+    def set_status(self, text, tone="", opens=False):
+        # opens: clicking the status opens the output folder (after a split)
+        self.status = (text, tone, opens)
         self.emit("status", self.status)
 
     def log_line(self, text):
-        file_log(text)
+        file_log(text)  # the file keeps every line as it was, for bug reports
+        text = readable(text)
+        if text is None:
+            return
         self.log_lines.append(text)
         del self.log_lines[:-2000]
         self.emit("log", text)
@@ -1879,7 +1911,7 @@ class Engine:
     def wait_detected(self, path):
         """The background detector's result for a sample, waiting if it's still working on it."""
         if path in self.pending:
-            self.q.put(("status", "Detecting BPM and key..."))
+            self.q.put(("status", "Detecting BPM and key…"))
         t = time.time()
         deadline = time.monotonic() + 60  # never let a slow or stuck detection hold up the stems
         while path in self.pending and time.monotonic() < deadline:
@@ -2053,9 +2085,10 @@ class Engine:
             self.started_at = time.time()
             self.emit("run", self.run_state())
             self.emit("progress", 0)
-            self.set_status("Starting...")
-            self.log_line(f"--- {model_name} | {st['quality']} quality | {settings['format']} | "
-                          f"{len(self.files)} file(s) ---")
+            self.set_status("Getting the engine ready…")
+            count = len(self.files)
+            self.log_line(f"Splitting {count} sample{'s' if count != 1 else ''} with {model_name} · "
+                          f"{st['quality']} · {settings['format']}")
             threading.Thread(target=self.worker, args=(settings,), daemon=True).start()
 
     def stop(self):
@@ -2065,7 +2098,7 @@ class Engine:
         if self.running:
             self.warm.kill()  # restarted (and warmed up again) after the split ends
         if self.running:
-            self.set_status("Stopping...", "warn")
+            self.set_status("Stopping…", "warn")
 
     def finish(self, result):
         self.running = False
@@ -2075,7 +2108,10 @@ class Engine:
         self.emit("run", self.run_state())
         if result == "ok":
             self.emit("progress", 1)
-            self.set_status(f"Done! Stems saved in {Path(self.settings['out']).name}", "good")
+            out = Path(self.settings["out"])
+            count = sum(len(r["files"]) for r in self.results)
+            where = f"…\\{out.parent.name}\\{out.name}" if out.parent.name else str(out)
+            self.set_status(f"{count} stem{'s' if count != 1 else ''} saved to {where}", "good", opens=True)
             open_folder(self.settings["out"])
         elif result == "stopped":
             self.set_status("Stopped.", "warn")
@@ -2175,9 +2211,9 @@ class Engine:
             return tell("error", error="That didn't work. Open the log for details.")
         paths = done.pop("paths")
         self.made.update(paths)
-        self.log_line(f"Edit {tool}: {src.name} -> {paths[0] if len(paths) == 1 else Path(paths[0]).parent}")
-        size = sum(Path(p).stat().st_size for p in paths) / 1_048_576
-        tell("done", paths=paths, size=f"{size:.1f} MB", **done)
+        name = {"match": "Match", "loop": "Loop", "midi": "MIDI"}[tool]
+        self.log_line(f"{name}: {src.name} -> {paths[0] if len(paths) == 1 else Path(paths[0]).parent}")
+        tell("done", paths=paths, size=size_text(sum(Path(p).stat().st_size for p in paths)), **done)
 
     def edit_match(self, job):
         bpm, key, instr, src = job["bpm"], job["key"], job["instr"], job["src"]
@@ -2318,7 +2354,7 @@ class Engine:
             # looking the video up (and YouTube's JS check) takes most of the wait; the download itself is quick
             self.emit("yt", dict(self.yt_state(), label="Fetching"))
             if not self.running:
-                self.set_status("Fetching from YouTube...")
+                self.set_status("Fetching from YouTube…")
             threading.Thread(target=self.yt_worker, args=(url,), daemon=True).start()
 
     def yt_worker(self, url):
@@ -2351,11 +2387,11 @@ class Engine:
 
     def on_yt_progress(self, pct, phase):
         if phase == "analyze":
-            label, status = "Analyzing", "Detecting BPM and key..."
+            label, status = "Analyzing", "Detecting BPM and key…"
         elif phase == "download":
-            label, status = f"{pct * 100:.0f}%", "Downloading from YouTube..."
+            label, status = f"{pct * 100:.0f}%", "Downloading from YouTube…"
         else:
-            label, status = "Converting", "Converting to WAV..."
+            label, status = "Converting", "Converting to WAV…"
         self.emit("yt", dict(self.yt_state(), label=label, pct=pct if phase == "download" else None))
         if not self.running:
             self.set_status(status)
@@ -2446,7 +2482,7 @@ class Engine:
             self.mark("prepare files", time.time() - t_start)
             self.run_parts(parts, tmp_in, work, s, len(s["files"]) * (3 if s["tta"] else 1) * s["shifts"])
 
-            self.q.put(("status", "Saving stems..."))
+            self.q.put(("status", "Saving stems…"))
             t = time.time()
             self.save_outputs(s, parts, work, names, results)
             self.mark("save stems", time.time() - t - self.timing.get("waiting for BPM/key", 0))
@@ -2544,7 +2580,7 @@ class Engine:
                 t_part = time.time()
                 index, done_bars, last_pct = int(line.split()[1]), 0, 0
                 label = parts[index].get("label", parts[index]["folder"])
-                self.q.put(("status", f"Loading {label} ({index + 1}/{total_parts})..."))
+                self.q.put(("status", f"Loading {label} ({index + 1}/{total_parts})…"))
                 continue
             if line.startswith("@@gpu "):
                 continue
@@ -2558,7 +2594,7 @@ class Engine:
                 last_pct = pct
                 part_done = min(1.0, (done_bars + pct / 100) / max(1, bars))
                 self.q.put(("progress", (index + part_done) / total_parts))
-                self.q.put(("status", f"Separating... {((index + part_done) / total_parts) * 100:.0f}%"))
+                self.q.put(("status", f"Separating… {((index + part_done) / total_parts) * 100:.0f}%"))
             elif "BigShifts" not in line and "%|" not in line:
                 self.q.put(("log", line))
                 tail = (tail + [line])[-40:]
@@ -2640,7 +2676,7 @@ class Engine:
                 bpm, key = self.refine_from_stems(src, final, sr, bpm, key)
             else:
                 key = None
-            self.q.put(("status", "Saving stems..."))
+            self.q.put(("status", "Saving stems…"))
 
             base = untagged(stem_name)  # a renamed YouTube download already carries its BPM/key
             dest = s["out"] / base

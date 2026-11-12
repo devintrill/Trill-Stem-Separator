@@ -8,6 +8,8 @@
   const ICON_PEN = '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>';
   const ICON_GRIP = '<circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/>';
   const title = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
+  // keys on screen use real sharps and flats (C♯ min, B♭ maj); file names keep plain # and b
+  const prettyKey = (k) => (k ? String(k).replace(/\b([A-G])#/g, '$1♯').replace(/\b([A-G])b\b/g, '$1♭') : k);
 
   const S = { settings: {}, models: [], running: false, started: 0, results: { items: [], selected: 0 },
               player: { ready: false, playing: false, pos: 0, length: 0, solo: [], mute: [] }, playerAt: 0,
@@ -109,6 +111,7 @@
     for (const [p, r] of rows) if (!keep.has(p)) { r.remove(); rows.delete(p); }
     // empty: the drop zone says it all, there's nothing to clear and nothing to separate
     S.hasFiles = files.length > 0;
+    S.filePaths = files.map((f) => f.path);
     $('clear').style.visibility = S.hasFiles ? '' : 'hidden';
     renderGo();
     files.forEach((f, i) => {
@@ -121,7 +124,6 @@
         x.addEventListener('pointerdown', (e) => e.stopPropagation());
         r.append(grip, el('span', 'name', f.name), el('span', 'tags'), el('span', 'size', f.size), x);
         // the original can go straight into the DAW too, e.g. a YouTube rip you don't want split
-        r.title = 'Drag into your DAW';
         dragOut(r, () => [f.path]);
         rows.set(f.path, r);
       }
@@ -137,7 +139,7 @@
     box.dataset.sig = sig;
     const out = [];
     if (f.bpm) out.push(el('span', 'badge bpm', `${f.bpm} BPM`));
-    if (f.key) out.push(el('span', 'badge key', f.key));
+    if (f.key) out.push(el('span', 'badge key', prettyKey(f.key)));
     if (!out.length && f.busy) out.push(el('span', 'badge wait', 'BPM'), el('span', 'badge wait', 'Key'));
     else if (!out.length && f.done) out.push(el('span', 'badge none', 'No BPM / key'));
     box.replaceChildren(...out);
@@ -145,10 +147,13 @@
 
   /* ---------- status / run ---------- */
   let booted = false;
-  function setStatus([text, tone]) {
+  function setStatus([text, tone, opens]) {
     const s = $('status');
     if (booted && tone === 'good' && s.textContent !== text) confetti(S.finishedBy);
-    s.textContent = text; s.className = 'status ' + (tone || '');
+    s.textContent = text; s.className = 'status ' + (tone || '') + (opens ? ' opens' : '');
+    if (opens) { S.doneSig = runSig(); renderGo(); }  // a split just finished with these samples and settings
+    if (text === 'Ready' && !S.running) { S.started = 0; $('elapsed').textContent = ''; }  // the last split's time goes too
+    if (opens) s.title = 'Open the folder'; else { s.removeAttribute('title'); delete s.dataset.tip; }
   }
 
   /* ---------- logo: the pad mark doubles as the app's status ---------- */
@@ -215,12 +220,15 @@
     renderLogo(); renderPending();
   }
   // Separate: lit while there's something to split, pressed in while it works, an unlit key with no samples
+  // after a split, the same samples and settings would only redo it: Separate goes unlit as "Separate again"
+  const runSig = () => JSON.stringify([S.filePaths || [], S.settings.model, S.settings.quality, S.settings.format, S.settings.nodrums]);
   function renderGo() {
-    const go = $('go'), idle = !S.running && !S.hasFiles;
+    const go = $('go'), idle = !S.running && !S.hasFiles, again = !S.running && !idle && S.doneSig === runSig();
     go.disabled = S.running || idle;
-    go.textContent = S.running ? (S.runLabel || 'Working') : 'Separate';
+    go.textContent = S.running ? (S.runLabel || 'Working') : again ? 'Separate again' : 'Separate';
     go.classList.toggle('working', S.running);
     go.classList.toggle('idle', idle);
+    go.classList.toggle('again', again);
   }
   function tickElapsed() {
     if (!S.started) return;
@@ -290,7 +298,6 @@
     $('strips').dataset.sig = '';
     $('strips').replaceChildren(...r.files.map((f, i) => {
       const s = el('div', 'strip drag'); s.dataset.name = f.instr; s.style.animationDelay = (i * 110) + 'ms';
-      s.title = 'Drag into your DAW · double-click to show the file';
       const grip = el('span', 'grip'); grip.append(svg(ICON_GRIP));
       const nm = el('div', 'nm'); nm.append(grip, el('span', 'label', title(f.instr)));
       const top = el('div', 'top');
@@ -341,7 +348,7 @@
     if (!r) return;
     Object.assign(ED, { index, instr, key: S.settings.project_key || null, start: 1, total: 0 });
     $('ed-name').textContent = title(instr);
-    $('ed-from').textContent = [r.bpm && `${firstOf(r.bpm)} BPM`, firstOf(r.key)].filter(Boolean).join(' · ');
+    $('ed-from').textContent = [r.bpm && `${firstOf(r.bpm)} BPM`, prettyKey(firstOf(r.key))].filter(Boolean).join(' · ');
     $('ed-bpm').value = S.settings.project_bpm || '';
     $('editor').hidden = false;
     // the sliders measure their buttons, so they're placed once the panel is showing
@@ -368,7 +375,7 @@
     if (!ED.instr) return;
     const drums = DRUMS.includes(ED.instr), k = keyOf(ED.key);
     $('ed-key').classList.toggle('off', drums);
-    $('ed-keytext').textContent = drums ? 'Drums keep their pitch' : k ? KEYS[k.t] : 'Any key';
+    $('ed-keytext').textContent = drums ? 'Drums keep their pitch' : k ? prettyKey(KEYS[k.t]) : 'Any key';
     $('ed-keytext').title = k && !drums ? 'Click to keep the key' : '';
     $('ed-mode').hidden = drums || !k;
     $('ed-mode').textContent = k ? k.mode : '';
@@ -446,7 +453,7 @@
     // what it made, as a sample row: play it first (a loop goes round), drag it into the DAW, double-click to show it
     const row = el('div', 'file'), grip = el('span', 'grip'), tags = el('span', 'tags');
     grip.append(svg(ICON_GRIP));
-    if (v.tool === 'midi') tags.append(el('span', 'badge none', `${v.notes} notes`));
+    if (v.tool === 'midi') tags.append(el('span', 'badge none', `${v.notes} note${v.notes === 1 ? '' : 's'}`));
     else fillTags(tags, { bpm: v.bpm, key: v.key, done: true });
     row.append(grip);
     if (v.tool !== 'midi') {
@@ -458,7 +465,6 @@
       row.append(aud);
     }
     row.append(el('span', 'name', v.name), tags, el('span', 'size', v.size));
-    row.title = 'Drag into your DAW · double-click to show ' + (v.paths.length > 1 ? 'the files' : 'the file');
     dragOut(row, () => v.paths);
     row.addEventListener('dblclick', () => call('open_folder_of', v.paths[0]));
     out.replaceChildren(row);
@@ -516,8 +522,9 @@
       const hush = i >= 0 && !!waves.silent[i];
       if (s.classList.contains('hush') !== hush) {
         s.classList.toggle('hush', hush);
-        s.title = hush ? 'Almost silent in this sample · drag into your DAW · double-click to show the file'
-                       : 'Drag into your DAW · double-click to show the file';
+        // the only hint a pad carries: the grip already says "drag", and a bubble on every hover covered the header
+        if (hush) s.title = 'Almost silent in this sample';
+        else { s.removeAttribute('title'); delete s.dataset.tip; }
       }
       if (i < 0) return;
       const wave = el('div', 'wave'), lit = el('div', 'wave-lit');
@@ -721,7 +728,7 @@
     if (!t || t === tipFor) return;
     if (t.hasAttribute('title')) { t.dataset.tip = t.title; t.removeAttribute('title'); }  // no native tooltip too
     hideTip(); tipFor = t;
-    tipTimer = setTimeout(() => showTip(t), 450);
+    tipTimer = setTimeout(() => showTip(t), 700);  // only when you pause on something, not while passing over it
   });
   document.addEventListener('pointerout', (e) => { if (tipFor && !tipFor.contains(e.relatedTarget)) hideTip(); });
   document.addEventListener('pointerdown', hideTip, true);
@@ -729,7 +736,7 @@
   /* ---------- events from Python ---------- */
   const on = {
     settings(v) {
-      S.settings = v; renderSettings();
+      S.settings = v; renderSettings(); renderGo();
       if (ED.instr && document.activeElement !== $('ed-bpm')) $('ed-bpm').value = v.project_bpm || '';  // a typo comes back empty
     },
     files(v) { endDrag(); renderFiles(v); },
@@ -785,6 +792,7 @@
     $('go').addEventListener('click', () => call('start'));
     $('stop').addEventListener('click', () => call('stop'));
     $('log-btn').addEventListener('click', () => showLog(!$('log').classList.contains('open')));
+    $('status').addEventListener('click', () => { if ($('status').classList.contains('opens')) call('open_output'); });
     $('toast-undo').addEventListener('click', undoRemoval);
     $('play').addEventListener('click', () => call('toggle_play'));
     const seek = $('seek');

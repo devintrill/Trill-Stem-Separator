@@ -1403,6 +1403,25 @@ body.locked .pill.good i { background: var(--pad-lit); }
 .ed-out .file { flex: 1; min-width: 0; }
 .ed-note { font-size: 12.5px; color: #f2a6a6; }
 
+/* a pad's pencil and x ride on its top edge, clear of the S key below them */
+.strip .rm, .strip .ed { top: -13px; }
+
+/* the status after a split opens the folder it names */
+.status.opens { cursor: pointer; }
+.status.opens:hover { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgba(237, 237, 234, 0.35); }
+
+/* the drop zone takes the room the sample list isn't using, and gives it back as samples pile up */
+.samples .drop { flex: 1 1 92px; height: auto; min-height: 92px; max-height: 260px; }
+.samples .list { flex: 0 1 auto; }
+
+/* an emptied pad (removed, or lifted while dragging) keeps its name where it was, not after a hidden grip */
+.strip.gone .grip, .strip.lifted .grip { display: none; }
+
+/* Separate after a finished split: unlit until something changes, since pressing it would redo the same split */
+.btn.cta.again:not(:disabled) { color: var(--foreground); background: linear-gradient(180deg, #34343f, #2a2a35);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 4px 0 #121218, 0 10px 18px rgba(0, 0, 0, 0.35); }
+.btn.cta.again:not(:disabled):hover { color: var(--pad-lit); }
+
 /* Separate with no samples: an unlit key (no gold, no glow) that lights up once there's something to split */
 .btn.cta.idle:disabled { transform: none; cursor: default; color: var(--muted-dim);
   background: linear-gradient(180deg, #2a2a35, #22222c);
